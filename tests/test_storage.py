@@ -60,6 +60,20 @@ def test_save_pcap_wraps_scapy_error(monkeypatch, tmp_path):
         save_pcap(tmp_path / "capture.pcap", [make_record(original_packet=Ether())])
 
 
+def test_save_pcap_rejects_mixed_link_layer_types(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(storage_module, "wrpcap", lambda *args: calls.append(args))
+    records = [
+        make_record(original_packet=Ether(), link_type="ethernet"),
+        make_record(original_packet=IP(), link_type="raw_ipv4"),
+    ]
+
+    with pytest.raises(StorageError, match="不同链路层类型"):
+        save_pcap(tmp_path / "mixed.pcap", records)
+
+    assert calls == []
+
+
 def test_export_csv_uses_utf8_bom_and_exports_all_summaries(tmp_path):
     records = [
         make_record(info="=WEBSERVICE()", errors=["截断"]),

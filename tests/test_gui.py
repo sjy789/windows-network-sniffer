@@ -75,3 +75,32 @@ def test_packet_detail_and_hex_view(monkeypatch) -> None:
     assert "68 65 6C 6C 6F" in window.raw_view.toPlainText()
     assert "hello" in window.raw_view.toPlainText()
     window.close()
+
+
+def test_table_model_reports_records_evicted_by_rolling_limit() -> None:
+    model = gui_module.PacketTableModel(max_records=2)
+
+    model.add_records([sample_record(), sample_record(), sample_record()])
+
+    assert len(model.records) == 2
+    assert model.evicted_count == 1
+    model.clear()
+    assert model.evicted_count == 0
+
+
+def test_background_failure_restores_controls_and_surfaces_error(monkeypatch) -> None:
+    interface = InterfaceInfo("测试网卡", "Npcap test", r"\Device\NPF_TEST")
+    monkeypatch.setattr(gui_module, "list_capture_interfaces", lambda: [interface])
+    session = FakeCaptureSession()
+    window = gui_module.MainWindow(capture_session=session)
+    window.start_capture()
+    assert window.stop_button.isEnabled()
+
+    session.running = False
+    session.last_error = "Npcap read failed"
+    window._drain_capture_queue()
+
+    assert window.start_button.isEnabled()
+    assert not window.stop_button.isEnabled()
+    assert "Npcap read failed" in window.capture_status_label.text()
+    window.close()

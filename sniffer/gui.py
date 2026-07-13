@@ -53,6 +53,7 @@ class PacketTableModel(QAbstractTableModel):
         self._visible: list[int] = []
         self._filter = DisplayFilter.parse("")
         self._next_sequence = 1
+        self._evicted_count = 0
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
         return 0 if parent.isValid() else len(self._visible)
@@ -106,6 +107,12 @@ class PacketTableModel(QAbstractTableModel):
     def visible_count(self) -> int:
         return len(self._visible)
 
+    @property
+    def evicted_count(self) -> int:
+        """Number of records removed by the rolling display limit."""
+
+        return self._evicted_count
+
     def record_at(self, visible_row: int) -> PacketRecord | None:
         if 0 <= visible_row < len(self._visible):
             return self._records[self._visible[visible_row]]
@@ -124,6 +131,7 @@ class PacketTableModel(QAbstractTableModel):
         overflow = len(self._records) - self.max_records
         if overflow > 0:
             del self._records[:overflow]
+            self._evicted_count += overflow
         self._rebuild_visible()
         self.endResetModel()
 
@@ -132,6 +140,7 @@ class PacketTableModel(QAbstractTableModel):
         self._records.clear()
         self._visible.clear()
         self._next_sequence = 1
+        self._evicted_count = 0
         self.endResetModel()
 
     def set_filter(self, display_filter: DisplayFilter) -> None:
@@ -299,8 +308,10 @@ class MainWindow(QMainWindow):
             self._session.stop()
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "停止抓包", str(exc))
+            self.capture_status_label.setText(f"停止失败：{exc}")
+        else:
+            self.capture_status_label.setText("抓包已停止")
         self._drain_capture_queue()
-        self.capture_status_label.setText("抓包已停止")
         self._update_controls()
 
     def clear_packets(self) -> None:
@@ -332,6 +343,15 @@ class MainWindow(QMainWindow):
         if not records:
             QMessageBox.information(self, "保存 PCAP", "当前没有可保存的数据包。")
             return
+        if self.table_model.evicted_count:
+            answer = QMessageBox.question(
+                self,
+                "保存范围不完整",
+                f"显示缓存已淘汰 {self.table_model.evicted_count} 条较早记录，"
+                "PCAP 只能保存当前保留的数据。是否继续？",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         path, _ = QFileDialog.getSaveFileName(self, "保存原始抓包", "capture.pcap", "PCAP 文件 (*.pcap)")
         if not path:
             return
@@ -347,6 +367,15 @@ class MainWindow(QMainWindow):
         if not records:
             QMessageBox.information(self, "导出 CSV", "当前没有可导出的数据包摘要。")
             return
+        if self.table_model.evicted_count:
+            answer = QMessageBox.question(
+                self,
+                "导出范围不完整",
+                f"显示缓存已淘汰 {self.table_model.evicted_count} 条较早记录，"
+                "CSV 只能导出当前保留的摘要。是否继续？",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         path, _ = QFileDialog.getSaveFileName(self, "导出摘要", "capture-summary.csv", "CSV 文件 (*.csv)")
         if not path:
             return
@@ -363,8 +392,16 @@ class MainWindow(QMainWindow):
             self.table_model.add_records(records)
             if self.packet_table.currentIndex().isValid() is False and self.table_model.rowCount() > 0:
                 self.packet_table.selectRow(0)
+        # Reading running synchronizes unexpected AsyncSniffer termination and
+        # keeps the controls usable after a background worker failure.
+        running = self._session.running
         if self._session.last_error:
             self.capture_status_label.setText(f"抓包错误：{self._session.last_error}")
+        elif getattr(self._session, "last_warning", None):
+            self.capture_status_label.setText(f"最近解析警告：{self._session.last_warning}")
+        elif not running and self.stop_button.isEnabled():
+            self.capture_status_label.setText("抓包线程已停止")
+        self._update_controls()
         self._update_status_counts()
 
     def _show_selected_packet(self, current: QModelIndex, _previous: QModelIndex) -> None:
@@ -406,12 +443,19 @@ class MainWindow(QMainWindow):
         stats = self._session.stats
         self.counter_label.setText(
             f"捕获 {stats.captured} | 显示 {self.table_model.visible_count} | "
-            f"丢弃 {stats.dropped} | 解析警告 {stats.parse_errors} | 重组 {stats.reassembled}"
+            f"淘汰 {self.table_model.evicted_count} | 丢弃 {stats.dropped} | "
+            f"解析警告 {stats.parse_errors} | 重组 {stats.reassembled}"
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if self._session.running:
-            self._session.stop()
+            try:
+                self._session.stop()
+            except Exception as exc:  # noqa: BLE001
+                self.capture_status_label.setText(f"停止失败：{exc}")
+                QMessageBox.warning(self, "无法关闭", f"抓包线程尚未安全停止：{exc}")
+                event.ignore()
+                return
         event.accept()
 
 
