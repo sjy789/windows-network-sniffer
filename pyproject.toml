@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "windows-network-sniffer"
+version = "0.1.0"
+description = "基于 Npcap、Scapy 和 PyQt6 的网络嗅探器课程项目"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "scapy==2.7.0",
+    "PyQt6==6.11.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest==9.1.1"]
+
+[project.scripts]
+network-sniffer = "sniffer.app:main"
+
+[tool.setuptools.packages.find]
+include = ["sniffer*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
