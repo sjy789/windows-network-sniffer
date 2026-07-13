@@ -25,7 +25,8 @@ _PROTOCOL_ALIASES = {
     "dns": "dns",
     "dhcp": "dhcp",
     "http": "http",
-    "https": "https",
+    # HTTPS traffic is represented as the parser's transparent TLS hint.
+    "https": "tls",
     "tls": "tls",
     "quic": "quic",
     "unknown": "unknown",

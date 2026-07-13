@@ -56,6 +56,7 @@ class CaptureSession:
         self._stats = CaptureStats()
         self._sequence = 0
         self.last_error: str | None = None
+        self.last_warning: str | None = None
 
     @property
     def running(self) -> bool:
@@ -63,19 +64,22 @@ class CaptureSession:
 
         with self._lock:
             sniffer = self._sniffer
-            if not self._running or sniffer is None:
+            if sniffer is None:
+                self._running = False
                 return False
 
             sniffer_running = bool(getattr(sniffer, "running", False))
             thread = getattr(sniffer, "thread", None)
             thread_alive = bool(thread is not None and thread.is_alive())
-            if not sniffer_running and not thread_alive:
-                self._running = False
-                exception = getattr(sniffer, "exception", None)
-                if exception is not None:
-                    self.last_error = f"抓包线程已停止：{exception}"
-                return False
-            return True
+            alive = sniffer_running or thread_alive
+            self._running = alive
+            if alive:
+                return True
+
+            exception = getattr(sniffer, "exception", None)
+            if exception is not None:
+                self.last_error = f"抓包线程已停止：{exception}"
+            return False
 
     @property
     def stats(self) -> CaptureStats:
@@ -111,6 +115,7 @@ class CaptureSession:
             self._stats = CaptureStats()
             self._sequence = 0
             self.last_error = None
+            self.last_warning = None
             self._started.clear()
             clear = getattr(self._reassembler, "clear", None)
             if callable(clear):
@@ -154,10 +159,8 @@ class CaptureSession:
 
         with self._lock:
             sniffer = self._sniffer
-            was_running = self._running
-            self._running = False
 
-        if sniffer is None or not was_running:
+        if sniffer is None:
             return
 
         # Socket setup occurs in Scapy's worker.  A very quick stop should give
@@ -167,18 +170,37 @@ class CaptureSession:
 
         try:
             if bool(getattr(sniffer, "running", False)):
-                sniffer.stop(join=True)
+                # Ask Scapy to close the capture socket, then apply our own
+                # bounded join so closing the GUI cannot hang indefinitely.
+                sniffer.stop(join=False)
+                thread = getattr(sniffer, "thread", None)
+                if thread is not None and thread.is_alive():
+                    thread.join(timeout=3.0)
+                    if thread.is_alive():
+                        raise TimeoutError("抓包线程未在 3 秒内停止")
             else:
                 thread = getattr(sniffer, "thread", None)
                 if thread is not None and thread.is_alive():
                     thread.join(timeout=1.0)
+                    if thread.is_alive():
+                        raise TimeoutError("抓包线程未在 1 秒内停止")
                 exception = getattr(sniffer, "exception", None)
                 if exception is not None:
                     raise exception
         except Exception as exc:
             with self._lock:
+                # The worker may still be alive after a failed stop.  Preserve
+                # that state so start() cannot create a second capture worker.
+                thread = getattr(sniffer, "thread", None)
+                self._running = bool(getattr(sniffer, "running", False)) or bool(
+                    thread is not None and thread.is_alive()
+                )
                 self.last_error = f"停止抓包时发生错误：{exc}"
             raise CaptureError(self.last_error) from exc
+        else:
+            with self._lock:
+                self._running = False
+                self._sniffer = None
 
     def drain(self, max_items: int = 200) -> list[PacketRecord]:
         """Remove and return at most ``max_items`` records without blocking."""
@@ -227,7 +249,7 @@ class CaptureSession:
                 expire(now=timestamp)
             except Exception as exc:  # Cache cleanup must never kill capture.
                 with self._lock:
-                    self.last_error = f"清理 IPv4 分片缓存失败：{exc}"
+                    self.last_warning = f"清理 IPv4 分片缓存失败：{exc}"
         with self._lock:
             self._stats.captured += 1
 
@@ -259,7 +281,7 @@ class CaptureSession:
             if record.errors:
                 with self._lock:
                     self._stats.parse_errors += 1
-                    self.last_error = f"数据包解析警告：{record.errors[0]}"
+                    self.last_warning = f"数据包解析警告：{record.errors[0]}"
                 parse_failure_counted = True
         except Exception as exc:
             error = f"数据包解析失败：{exc}"
@@ -279,7 +301,7 @@ class CaptureSession:
             )
             with self._lock:
                 self._stats.parse_errors += 1
-                self.last_error = error
+                self.last_warning = error
             parse_failure_counted = True
 
         self._enqueue(record)
@@ -312,7 +334,7 @@ class CaptureSession:
             with self._lock:
                 if not parse_failure_counted:
                     self._stats.parse_errors += 1
-                self.last_error = error
+                self.last_warning = error
             return
 
         note = self._reassembly_note(result)
@@ -325,7 +347,7 @@ class CaptureSession:
                 # warning strings attached to one packet.
                 if not parse_failure_counted:
                     self._stats.parse_errors += 1
-                self.last_error = f"IPv4 分片重组失败：{result.error}"
+                self.last_warning = f"IPv4 分片重组失败：{result.error}"
         if not result.complete or result.ip_packet is None:
             return
 
@@ -359,7 +381,7 @@ class CaptureSession:
             )
             with self._lock:
                 self._stats.parse_errors += 1
-                self.last_error = error
+                self.last_warning = error
 
         with self._lock:
             self._stats.reassembled += 1
