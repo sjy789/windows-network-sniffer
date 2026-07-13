@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSplitter,
+    QTabWidget,
     QTableView,
     QTreeWidget,
     QTreeWidgetItem,
@@ -34,6 +35,9 @@ from PyQt6.QtWidgets import (
 )
 
 from .capture import CaptureSession
+from .analytics import Flow, FlowTracker, TrafficMeter
+from .anomaly import Alert, AnomalyDetector
+from .dashboard import MetricCard, TrafficChart
 from .filtering import DisplayFilter, FilterSyntaxError
 from .formatting import format_hex_ascii
 from .interfaces import list_capture_interfaces
@@ -153,6 +157,74 @@ class PacketTableModel(QAbstractTableModel):
         self._visible = [index for index, record in enumerate(self._records) if self._filter.matches(record)]
 
 
+class FlowTableModel(QAbstractTableModel):
+    HEADERS = ("协议", "端点 A", "端点 B", "状态", "持续时间", "A→B 包", "B→A 包", "总字节")
+
+    def __init__(self, tracker: FlowTracker, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.tracker = tracker
+        self._flows: list[Flow] = []
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
+        return 0 if parent.isValid() else len(self._flows)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
+        return 0 if parent.isValid() else len(self.HEADERS)
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole):  # noqa: N802, ANN201
+        return self.HEADERS[section] if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal else None
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):  # noqa: ANN201
+        if not index.isValid() or index.row() >= len(self._flows):
+            return None
+        flow = self._flows[index.row()]
+        if role == Qt.ItemDataRole.DisplayRole:
+            values = (flow.protocol, f"{flow.endpoint_a[0]}:{flow.endpoint_a[1]}", f"{flow.endpoint_b[0]}:{flow.endpoint_b[1]}", flow.tcp_state, f"{flow.duration:.3f}s", flow.packets_ab, flow.packets_ba, flow.byte_count)
+            return values[index.column()]
+        return None
+
+    def refresh(self) -> None:
+        self.beginResetModel()
+        self._flows = self.tracker.flows
+        self.endResetModel()
+
+    def flow_at(self, row: int) -> Flow | None:
+        return self._flows[row] if 0 <= row < len(self._flows) else None
+
+
+class AlertTableModel(QAbstractTableModel):
+    HEADERS = ("时间", "级别", "类型", "来源", "说明", "数据包")
+
+    def __init__(self, detector: AnomalyDetector, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.detector = detector
+        self._alerts: list[Alert] = []
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
+        return 0 if parent.isValid() else len(self._alerts)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:  # noqa: N802
+        return 0 if parent.isValid() else len(self.HEADERS)
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole):  # noqa: N802, ANN201
+        return self.HEADERS[section] if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal else None
+
+    def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):  # noqa: ANN201
+        if not index.isValid() or index.row() >= len(self._alerts):
+            return None
+        alert = self._alerts[index.row()]
+        if role == Qt.ItemDataRole.DisplayRole:
+            return (alert.timestamp_text, alert.severity.upper(), alert.category, alert.source, alert.description, alert.packet_sequence)[index.column()]
+        if role == Qt.ItemDataRole.ForegroundRole:
+            return QColor({"critical": "#b42318", "high": "#dc6803", "medium": "#9a6700", "low": "#175cd3"}.get(alert.severity, "#344054"))
+        return None
+
+    def refresh(self) -> None:
+        self.beginResetModel()
+        self._alerts = list(self.detector.alerts)
+        self.endResetModel()
+
+
 class MainWindow(QMainWindow):
     """网络嗅探器主窗口。"""
 
@@ -162,6 +234,9 @@ class MainWindow(QMainWindow):
         self.resize(1280, 820)
         self._session = capture_session or CaptureSession(queue_size=5_000)
         self._interfaces: list[InterfaceInfo] = []
+        self.traffic_meter = TrafficMeter(window=60)
+        self.flow_tracker = FlowTracker()
+        self.anomaly_detector = AnomalyDetector()
 
         self._build_ui()
         self._connect_signals()
@@ -248,9 +323,62 @@ class MainWindow(QMainWindow):
         main_splitter.addWidget(detail_splitter)
         main_splitter.setSizes([470, 280])
 
+        packet_page = QWidget()
+        packet_layout = QVBoxLayout(packet_page)
+        packet_layout.setContentsMargins(6, 6, 6, 6)
+        packet_layout.addLayout(filter_row)
+        packet_layout.addWidget(main_splitter, 1)
+
+        dashboard_page = QWidget()
+        dashboard_layout = QVBoxLayout(dashboard_page)
+        cards = QHBoxLayout()
+        self.packet_rate_card = MetricCard("Packets / second")
+        self.byte_rate_card = MetricCard("Bytes / second")
+        self.flow_count_card = MetricCard("Active conversations")
+        self.alert_count_card = MetricCard("Security alerts")
+        for card in (self.packet_rate_card, self.byte_rate_card, self.flow_count_card, self.alert_count_card):
+            cards.addWidget(card)
+        self.traffic_chart = TrafficChart(self.traffic_meter)
+        self.protocol_summary = QLabel("等待实时数据")
+        dashboard_layout.addLayout(cards)
+        dashboard_layout.addWidget(self.traffic_chart, 1)
+        dashboard_layout.addWidget(self.protocol_summary)
+
+        sessions_page = QWidget()
+        sessions_layout = QVBoxLayout(sessions_page)
+        self.flow_model = FlowTableModel(self.flow_tracker, self)
+        self.flow_table = QTableView()
+        self.flow_table.setModel(self.flow_model)
+        self.flow_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.flow_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.stream_view = QPlainTextEdit()
+        self.stream_view.setReadOnly(True)
+        self.stream_view.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        self.stream_view.setPlaceholderText("选择 TCP 会话查看双向重组流")
+        flow_splitter = QSplitter(Qt.Orientation.Vertical)
+        flow_splitter.addWidget(self.flow_table)
+        flow_splitter.addWidget(self.stream_view)
+        sessions_layout.addWidget(flow_splitter)
+
+        alerts_page = QWidget()
+        alerts_layout = QVBoxLayout(alerts_page)
+        alert_note = QLabel("被动异常检测：端口扫描、SYN 洪泛、DNS 异常、ARP 地址冲突、分片异常与 TCP Reset")
+        self.alert_model = AlertTableModel(self.anomaly_detector, self)
+        self.alert_table = QTableView()
+        self.alert_table.setModel(self.alert_model)
+        self.alert_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.alert_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.alert_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        alerts_layout.addWidget(alert_note)
+        alerts_layout.addWidget(self.alert_table)
+
+        self.workspace_tabs = QTabWidget()
+        self.workspace_tabs.addTab(packet_page, "数据包")
+        self.workspace_tabs.addTab(dashboard_page, "流量态势")
+        self.workspace_tabs.addTab(sessions_page, "会话与 TCP 流")
+        self.workspace_tabs.addTab(alerts_page, "异常检测")
         outer.addWidget(capture_group)
-        outer.addLayout(filter_row)
-        outer.addWidget(main_splitter, 1)
+        outer.addWidget(self.workspace_tabs, 1)
         self.setCentralWidget(central)
 
         self.capture_status_label = QLabel("未开始抓包")
@@ -269,6 +397,7 @@ class MainWindow(QMainWindow):
         self.clear_filter_button.clicked.connect(self.clear_display_filter)
         self.display_filter_edit.returnPressed.connect(self.apply_display_filter)
         self.packet_table.selectionModel().currentRowChanged.connect(self._show_selected_packet)
+        self.flow_table.selectionModel().currentRowChanged.connect(self._show_selected_flow)
 
     def refresh_interfaces(self) -> None:
         if self._session.running:
@@ -318,6 +447,13 @@ class MainWindow(QMainWindow):
         self.table_model.clear()
         self.detail_tree.clear()
         self.raw_view.clear()
+        self.traffic_meter.clear()
+        self.flow_tracker.clear()
+        self.anomaly_detector.clear()
+        self.flow_model.refresh()
+        self.alert_model.refresh()
+        self.stream_view.clear()
+        self._refresh_dashboard()
         self._update_status_counts()
 
     def apply_display_filter(self) -> None:
@@ -390,6 +526,12 @@ class MainWindow(QMainWindow):
         records = self._session.drain(max_items=300)
         if records:
             self.table_model.add_records(records)
+            self.traffic_meter.add(records)
+            self.flow_tracker.add(records)
+            self.anomaly_detector.add(records)
+            self.flow_model.refresh()
+            self.alert_model.refresh()
+            self._refresh_dashboard()
             if self.packet_table.currentIndex().isValid() is False and self.table_model.rowCount() > 0:
                 self.packet_table.selectRow(0)
         # Reading running synchronizes unexpected AsyncSniffer termination and
@@ -430,6 +572,28 @@ class MainWindow(QMainWindow):
             self.detail_tree.addTopLevelItem(error_item)
         self.detail_tree.expandAll()
         self.raw_view.setPlainText(format_hex_ascii(record.raw))
+
+    def _show_selected_flow(self, current: QModelIndex, _previous: QModelIndex) -> None:
+        flow = self.flow_model.flow_at(current.row())
+        if flow is None:
+            self.stream_view.clear()
+        elif flow.protocol == "TCP":
+            self.stream_view.setPlainText(flow.stream_text())
+        else:
+            self.stream_view.setPlainText("UDP 会话不提供字节流重组。")
+
+    def _refresh_dashboard(self) -> None:
+        point = self.traffic_meter.points[-1] if self.traffic_meter.points else None
+        self.packet_rate_card.value.setText(str(point.packets if point else 0))
+        self.byte_rate_card.value.setText(f"{point.bytes:,}" if point else "0")
+        self.flow_count_card.value.setText(str(len(self.flow_tracker.flows)))
+        self.alert_count_card.value.setText(str(len(self.anomaly_detector.alerts)))
+        total = self.traffic_meter.total_packets
+        self.protocol_summary.setText(
+            "   ".join(f"{name}: {count} ({count / total:.0%})" for name, count in self.traffic_meter.protocols.most_common(8))
+            if total else "等待实时数据"
+        )
+        self.traffic_chart.update()
 
     def _update_controls(self) -> None:
         running = self._session.running

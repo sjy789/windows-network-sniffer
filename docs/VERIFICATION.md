@@ -8,7 +8,7 @@
 2026-07-13 补丁回归环境：Windows 11 x64、Python 3.11.9。
 
 ```text
-72 passed
+81 passed
 pip check: No broken requirements found.
 compileall: passed
 ```
@@ -23,6 +23,9 @@ compileall: passed
 - 乱序、重复、空洞、重叠、超时和资源上限下的 IPv4 分片重组。
 - 网卡筛选、后台队列、停止逻辑、PCAP 和 CSV。
 - PyQt6 离屏初始化、控制状态、详情树和 Hex 视图。
+- DNS、HTTP、TLS 和 DHCP 应用层元数据解析。
+- 流量时间序列、双向会话和乱序 TCP 有效载荷整理。
+- 端口扫描、长 DNS 查询和 ARP 地址冲突等异常检测规则。
 - 停止失败后的会话状态、后台线程异常、滚动缓存淘汰计数和混合链路层 PCAP 拒绝逻辑。
 
 ## 真实环境验证
