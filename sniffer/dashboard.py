@@ -36,16 +36,17 @@ class TrafficChart(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         bounds = QRectF(self.rect()).adjusted(24, 28, -20, -28)
-        painter.fillRect(self.rect(), QColor("#111b27"))
-        painter.setPen(QPen(QColor("#243447"), 1))
+        painter.fillRect(self.rect(), QColor("#fbfdff"))
+        painter.setPen(QPen(QColor("#e3ebf2"), 1))
         for index in range(5):
             y = bounds.top() + bounds.height() * index / 4
             painter.drawLine(int(bounds.left()), int(y), int(bounds.right()), int(y))
         painter.setFont(QFont("Segoe UI", 9))
-        painter.setPen(QColor("#7e91a8"))
+        painter.setPen(QColor("#65788b"))
         painter.drawText(24, 19, "LIVE TRAFFIC · 60 SECOND SIGNAL")
         points = list(self.meter.points)
         if not points:
+            painter.setPen(QColor("#8b9cad"))
             painter.drawText(bounds, Qt.AlignmentFlag.AlignCenter, "开始抓包后显示实时流量波形")
             return
         max_packets = max(1, max(point.packets for point in points))
@@ -59,13 +60,13 @@ class TrafficChart(QWidget):
                 path.moveTo(x, y) if index == 0 else path.lineTo(x, y)
             return path
 
-        painter.setPen(QPen(QColor("#34d6c7"), 2.4))
+        painter.setPen(QPen(QColor("#11bfd0"), 2.4))
         painter.drawPath(path_for([point.packets for point in points], max_packets))
-        painter.setPen(QPen(QColor("#e9b44c"), 1.8, Qt.PenStyle.DashLine))
+        painter.setPen(QPen(QColor("#f59e0b"), 1.8, Qt.PenStyle.DashLine))
         painter.drawPath(path_for([point.bytes for point in points], max_bytes))
-        painter.setPen(QColor("#34d6c7"))
+        painter.setPen(QColor("#11a9bc"))
         painter.drawText(int(bounds.left()), int(bounds.bottom() + 18), f"● packets/s  peak {max_packets}")
-        painter.setPen(QColor("#e9b44c"))
+        painter.setPen(QColor("#d78200"))
         painter.drawText(int(bounds.left() + 180), int(bounds.bottom() + 18), f"◆ bytes/s  peak {max_bytes:,}")
 
 

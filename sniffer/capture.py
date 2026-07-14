@@ -94,6 +94,16 @@ class CaptureSession:
                 reassembled=self._stats.reassembled,
             )
 
+    @property
+    def queue_capacity(self) -> int:
+        """Maximum number of parsed packets waiting for the GUI.
+
+        The dashboard uses this read-only value for its queue health meter;
+        exposing it avoids coupling the interface to ``Queue`` internals.
+        """
+
+        return self._queue.maxsize
+
     def start(self, interface: InterfaceInfo, capture_filter: str = "") -> None:
         """Start asynchronous capture on ``interface``.
 
