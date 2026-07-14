@@ -147,6 +147,7 @@ def test_raw_ipv4_packet_is_normalized_before_parsing(fake_sniffer, interface):
 
 def test_bounded_queue_drops_new_records_instead_of_blocking(fake_sniffer, interface):
     session = CaptureSession(queue_size=1, parser=FakeParser(), reassembler=FakeReassembler())
+    assert session.queue_capacity == 1
     session.start(interface)
     worker = fake_sniffer.instances[-1]
     worker.emit(Ether() / IP())
