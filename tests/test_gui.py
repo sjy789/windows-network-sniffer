@@ -161,18 +161,23 @@ def test_open_offline_capture_loads_records_into_existing_models(monkeypatch) ->
         "getOpenFileName",
         lambda *args, **kwargs: (r"C:\captures\sample.pcap", ""),
     )
-    monkeypatch.setattr(
-        gui_module,
-        "load_capture_file",
-        lambda path: OfflineLoadResult(
-            records=[sample_record()],
+    def fake_load(path, **kwargs):
+        kwargs["batch_callback"]([sample_record()])
+        kwargs["progress_callback"](1)
+        return OfflineLoadResult(
             stats=CaptureStats(captured=1, queued=1, parse_errors=0, reassembled=0),
-        ),
-    )
+        )
+
+    monkeypatch.setattr(gui_module, "load_capture_file", fake_load)
     window = gui_module.MainWindow(capture_session=FakeCaptureSession())
 
     window.open_offline_capture()
+    deadline = time.monotonic() + 2
+    while window._offline_loading and time.monotonic() < deadline:
+        APP.processEvents()
+        time.sleep(0.01)
 
+    assert window._offline_loading is False
     assert window.table_model.rowCount() == 1
     assert window.captured_card.value_label.text() == "1"
     assert "sample.pcap" in window.capture_status_label.text()
