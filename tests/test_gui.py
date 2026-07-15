@@ -6,10 +6,11 @@ import time
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import QModelIndex
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QFileDialog
 
 import sniffer.gui as gui_module
 from sniffer.models import CaptureStats, InterfaceInfo, PacketRecord, ProtocolLayer
+from sniffer.offline import OfflineLoadResult
 
 
 APP = QApplication.instance() or QApplication([])
@@ -150,4 +151,29 @@ def test_sidebar_opens_every_analysis_workspace(monkeypatch) -> None:
         assert window.workspace_pages.currentIndex() == index
         assert button.property("active") is True
 
+    window.close()
+
+
+def test_open_offline_capture_loads_records_into_existing_models(monkeypatch) -> None:
+    monkeypatch.setattr(gui_module, "list_capture_interfaces", lambda: [])
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileName",
+        lambda *args, **kwargs: (r"C:\captures\sample.pcap", ""),
+    )
+    monkeypatch.setattr(
+        gui_module,
+        "load_capture_file",
+        lambda path: OfflineLoadResult(
+            records=[sample_record()],
+            stats=CaptureStats(captured=1, queued=1, parse_errors=0, reassembled=0),
+        ),
+    )
+    window = gui_module.MainWindow(capture_session=FakeCaptureSession())
+
+    window.open_offline_capture()
+
+    assert window.table_model.rowCount() == 1
+    assert window.captured_card.value_label.text() == "1"
+    assert "sample.pcap" in window.capture_status_label.text()
     window.close()
