@@ -7,7 +7,7 @@ from pathlib import Path
 from collections.abc import Callable
 from typing import Any
 
-from scapy.all import Ether, IP
+from scapy.all import Ether, IP, IPv6
 try:
     from scapy.utils import PcapReader
 except ImportError:  # pragma: no cover - depends on Scapy build
@@ -242,6 +242,8 @@ def _packet_data(packet: Any) -> tuple[bytes, str, str | None]:
             return bytes(packet[Ether]), "ethernet", None
         if callable(getattr(packet, "haslayer", None)) and packet.haslayer(IP):
             return bytes(packet[IP]), "raw_ipv4", None
+        if callable(getattr(packet, "haslayer", None)) and packet.haslayer(IPv6):
+            return bytes(packet[IPv6]), "raw_ipv6", None
         raw = bytes(packet)
     except Exception as exc:
         raise ValueError(f"无法读取数据包原始字节：{exc}") from exc

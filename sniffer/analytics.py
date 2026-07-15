@@ -30,6 +30,10 @@ class TrafficMeter:
     def add(self, records: Iterable[PacketRecord]) -> None:
         buckets: dict[int, list[int]] = {}
         for record in records:
+            # Reassembled records are synthetic analysis results, not another
+            # frame observed on the wire.  Counting them inflates traffic rate.
+            if record.is_reassembled:
+                continue
             second = int(record.timestamp)
             bucket = buckets.setdefault(second, [0, 0])
             bucket[0] += 1
@@ -108,6 +112,10 @@ class FlowTracker:
 
     def add(self, records: Iterable[PacketRecord]) -> None:
         for record in records:
+            # Do not create a partial transport conversation from the first IP
+            # fragment and then count the reassembled virtual record again.
+            if record.fragment is not None:
+                continue
             transport = self._transport(record)
             if transport not in {"TCP", "UDP"} or record.source_port is None or record.destination_port is None:
                 continue
@@ -174,7 +182,8 @@ def _tcp_segment(record: PacketRecord) -> tuple[int, set[str], bytes]:
     """Extract TCP sequence, flags and payload from supported raw frame layouts."""
     raw = record.raw
     offset = 0
-    if record.link_type == "ethernet":
+    normalized_link_type = record.link_type.strip().lower().replace("_", "-")
+    if normalized_link_type in {"ethernet", "ether", "en10mb"}:
         if len(raw) < 14:
             return 0, set(), b""
         offset = 14
@@ -182,14 +191,29 @@ def _tcp_segment(record: PacketRecord) -> tuple[int, set[str], bytes]:
         while ethertype in {0x8100, 0x88A8, 0x9100} and offset + 4 <= len(raw):
             ethertype = int.from_bytes(raw[offset + 2 : offset + 4], "big")
             offset += 4
-        if ethertype != 0x0800:
+        if ethertype not in {0x0800, 0x86DD}:
             return 0, set(), b""
-    if offset + 20 > len(raw) or raw[offset] >> 4 != 4:
+    elif normalized_link_type in {"loopback", "null", "dlt-null"}:
+        if len(raw) < 4:
+            return 0, set(), b""
+        offset = 4
+    if offset >= len(raw):
         return 0, set(), b""
-    ihl = (raw[offset] & 0x0F) * 4
-    total = int.from_bytes(raw[offset + 2 : offset + 4], "big")
-    tcp = offset + ihl
-    end = min(len(raw), offset + total)
+    version = raw[offset] >> 4
+    if version == 4:
+        if offset + 20 > len(raw) or raw[offset + 9] != 6:
+            return 0, set(), b""
+        ihl = (raw[offset] & 0x0F) * 4
+        total = int.from_bytes(raw[offset + 2 : offset + 4], "big")
+        tcp = offset + ihl
+        end = min(len(raw), offset + total)
+    elif version == 6:
+        located = _ipv6_tcp_bounds(raw, offset)
+        if located is None:
+            return 0, set(), b""
+        tcp, end = located
+    else:
+        return 0, set(), b""
     if tcp + 20 > end:
         return 0, set(), b""
     sequence = struct.unpack_from("!I", raw, tcp + 4)[0]
@@ -199,6 +223,42 @@ def _tcp_segment(record: PacketRecord) -> tuple[int, set[str], bytes]:
     flags = {name for bit, name in enumerate(names) if value & (1 << bit)}
     payload_start = tcp + header_length
     return sequence, flags, raw[payload_start:end] if payload_start <= end else b""
+
+
+def _ipv6_tcp_bounds(raw: bytes, offset: int) -> tuple[int, int] | None:
+    """Return TCP offset/end while safely walking common IPv6 extensions."""
+
+    if offset + 40 > len(raw):
+        return None
+    payload_length = int.from_bytes(raw[offset + 4 : offset + 6], "big")
+    end = len(raw) if payload_length == 0 else min(len(raw), offset + 40 + payload_length)
+    next_header = raw[offset + 6]
+    cursor = offset + 40
+    for _ in range(16):
+        if next_header == 6:
+            return (cursor, end)
+        if next_header in {0, 43, 60}:  # Hop-by-Hop, Routing, Destination
+            if cursor + 2 > end:
+                return None
+            header_length = (raw[cursor + 1] + 1) * 8
+        elif next_header == 44:  # Fragment
+            if cursor + 8 > end:
+                return None
+            flags_offset = int.from_bytes(raw[cursor + 2 : cursor + 4], "big")
+            if (flags_offset >> 3) != 0:
+                return None
+            header_length = 8
+        elif next_header == 51:  # Authentication Header
+            if cursor + 2 > end:
+                return None
+            header_length = (raw[cursor + 1] + 2) * 4
+        else:
+            return None
+        if header_length <= 0 or cursor + header_length > end:
+            return None
+        next_header = raw[cursor]
+        cursor += header_length
+    return None
 
 
 __all__ = ["Flow", "FlowTracker", "TrafficMeter", "TrafficPoint"]

@@ -1,14 +1,12 @@
 # 项目验证记录
 
-最新自动化验证：2026-07-15，macOS arm64、Python 3.12.13
+最新自动化验证：2026-07-15，Windows 11 x64、Python 3.12
 Windows 实机验证：2026-07-12，Windows 11 x64、Python 3.13.7、Npcap 1.88、Wireshark 4.6.7
 
 ## 自动化验证
 
-2026-07-13 补丁回归环境：Windows 11 x64、Python 3.11.9。
-
 ```text
-97 passed
+109 passed
 pip check: No broken requirements found.
 compileall: passed
 ```
@@ -27,7 +25,10 @@ compileall: passed
 - PyQt6 离屏初始化、控制状态、详情树和 Hex 视图。
 - DNS、HTTP、TLS 和 DHCP 应用层元数据解析。
 - 流量时间序列、双向会话和乱序 TCP 有效载荷整理。
+- IPv6 TCP 会话状态和双向载荷提取，以及原始 IPv6 离线抓包识别。
+- IPv4 分片/重组虚拟记录不会重复计入流量与会话统计。
 - 端口扫描、长 DNS 查询和 ARP 地址冲突等异常检测规则。
+- 离线加载取消与窗口关闭时的线程安全退出。
 - 停止失败后的会话状态、后台线程异常、滚动缓存淘汰计数和混合链路层 PCAP 拒绝逻辑。
 
 ## 真实环境验证

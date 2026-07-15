@@ -3,7 +3,10 @@ from __future__ import annotations
 import socket
 import struct
 
+from scapy.all import Ether, IPv6, Raw, TCP
+
 from sniffer.analytics import FlowTracker, TrafficMeter
+from sniffer.models import IPv4Fragment
 from sniffer.parser import PacketParser
 
 
@@ -44,3 +47,41 @@ def test_flow_tracker_merges_directions_and_reassembles_tcp_payload_by_sequence(
     assert bytes(flow.stream_ab) == b"helloworld"
     assert bytes(flow.stream_ba) == b"reply"
     assert flow.tcp_state == "Established"
+
+
+def test_ipv6_tcp_flow_extracts_flags_and_payload() -> None:
+    frame = bytes(
+        Ether()
+        / IPv6(src="2001:db8::1", dst="2001:db8::2")
+        / TCP(sport=1234, dport=8080, seq=10, flags="PA")
+        / Raw(b"hello-ipv6")
+    )
+    record = PacketParser().parse(frame, timestamp=1)
+    tracker = FlowTracker()
+
+    tracker.add([record])
+
+    flow = tracker.flows[0]
+    assert flow.tcp_state == "Established"
+    assert bytes(flow.stream_ab) == b"hello-ipv6"
+
+
+def test_synthetic_reassembly_does_not_inflate_traffic_and_fragments_do_not_duplicate_flow() -> None:
+    parser = PacketParser()
+    first = parser.parse(tcp_frame("192.0.2.1", "198.51.100.2", 1234, 80, 1, b"partial"), timestamp=1)
+    first.fragment = IPv4Fragment(
+        key=("192.0.2.1", "198.51.100.2", 6, 1), identification=1,
+        offset_bytes=0, more_fragments=True, payload=b"partial", ip_header=b"", link_header=b"", timestamp=1,
+    )
+    complete = parser.parse(tcp_frame("192.0.2.1", "198.51.100.2", 1234, 80, 1, b"complete"), timestamp=2)
+    complete.is_reassembled = True
+    meter = TrafficMeter()
+    tracker = FlowTracker()
+
+    meter.add([first, complete])
+    tracker.add([first, complete])
+
+    assert meter.total_packets == 1
+    assert meter.total_bytes == first.length
+    assert tracker.flows[0].packet_count == 1
+    assert bytes(tracker.flows[0].stream_ab) == b"complete"

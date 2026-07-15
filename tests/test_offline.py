@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from scapy.all import Ether, IP, UDP
+from scapy.all import Ether, IP, IPv6, UDP
 from scapy.utils import PcapNgWriter, wrpcap
 
 import sniffer.offline as offline_module
@@ -71,6 +71,20 @@ def test_load_capture_file_parses_packets_with_normal_pipeline(monkeypatch, tmp_
     assert len(result.records) == 1
     assert result.records[0].original_packet is packet
     assert result.records[0].link_type == "ethernet"
+
+
+def test_load_capture_file_recognizes_raw_ipv6_packets(monkeypatch, tmp_path) -> None:
+    packet = IPv6(src="2001:db8::1", dst="2001:db8::2") / UDP(sport=1000, dport=2000)
+    packet.time = 42.0
+    monkeypatch.setattr(offline_module, "PcapReader", lambda path: FakeReader(path, [packet]))
+    path = tmp_path / "raw-ipv6.pcap"
+    path.write_bytes(b"placeholder")
+
+    result = load_capture_file(path)
+
+    assert result.records[0].link_type == "raw_ipv6"
+    assert result.records[0].protocol == "UDP"
+    assert result.records[0].source == "2001:db8::1"
 
 
 def test_load_capture_file_emits_reassembled_virtual_record(monkeypatch, tmp_path) -> None:

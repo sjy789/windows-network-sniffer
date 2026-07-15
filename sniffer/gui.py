@@ -1566,7 +1566,11 @@ class MainWindow(QMainWindow):
             self._offline_worker.cancel()
         if self._offline_thread is not None and self._offline_thread.isRunning():
             self._offline_thread.quit()
-            self._offline_thread.wait(2000)
+            if not self._offline_thread.wait(5000):
+                self._set_capture_status("离线文件仍在停止，请稍后重试关闭")
+                QMessageBox.warning(self, "无法关闭", "离线文件读取线程尚未安全停止，请稍后再关闭窗口。")
+                event.ignore()
+                return
         if self._session.running:
             try:
                 self._session.stop()
