@@ -15,6 +15,7 @@ import time
 from typing import Any
 
 from .formatting import format_payload_summary
+from .application import decode_application
 from .models import IPv4Fragment, PacketRecord, ProtocolLayer
 
 
@@ -1487,6 +1488,7 @@ class PacketParser:
         )
         self._identify_application(record, "TCP", source_port, destination_port)
         if payload:
+            self._decode_application_payload(record, "TCP", source_port, destination_port, payload)
             self._add_payload_layer(record, payload)
 
     def _format_tcp_options(self, record: PacketRecord, options: bytes) -> str:
@@ -1580,7 +1582,16 @@ class PacketParser:
         record.info = f"{source_port} → {destination_port} Len={displayed_length}"
         self._identify_application(record, "UDP", source_port, destination_port)
         if payload:
+            self._decode_application_payload(record, "UDP", source_port, destination_port, payload)
             self._add_payload_layer(record, payload)
+
+    @staticmethod
+    def _decode_application_payload(record: PacketRecord, transport: str, source_port: int, destination_port: int, payload: bytes) -> None:
+        layer = decode_application(transport, source_port, destination_port, payload)
+        if layer is None:
+            return
+        record.layers = [candidate for candidate in record.layers if candidate.name not in {"DNS", "HTTP", "TLS", "DHCP", "QUIC"}]
+        record.layers.append(layer)
 
     @staticmethod
     def _identify_application(

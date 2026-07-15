@@ -72,7 +72,7 @@ def test_ipv6_addresses_are_normalized() -> None:
 
 
 def test_protocol_can_be_observed_in_layer_list() -> None:
-    record = _record(protocol="HTTPS")
+    record = _record(protocol="TLS")
     assert DisplayFilter.parse("tcp").matches(record)
     assert DisplayFilter.parse("https").matches(record)
 

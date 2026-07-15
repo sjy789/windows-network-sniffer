@@ -53,11 +53,18 @@ def save_pcap(path: str | Path, records: Iterable[PacketRecord]) -> int:
     """
 
     target = _prepare_path(path)
-    packets: list[Any] = [
-        record.original_packet
+    original_records = [
+        record
         for record in records
         if not record.is_reassembled and record.original_packet is not None
     ]
+    link_types = {record.link_type for record in original_records}
+    if len(link_types) > 1:
+        names = ", ".join(sorted(link_types))
+        raise StorageError(
+            f"不能把不同链路层类型写入同一个 PCAP：{names}；请分别保存每次网卡会话"
+        )
+    packets: list[Any] = [record.original_packet for record in original_records]
     if not packets:
         raise StorageError("没有可保存到 PCAP 的原始数据包")
 

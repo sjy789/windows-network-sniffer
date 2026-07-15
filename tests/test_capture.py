@@ -129,7 +129,7 @@ def test_start_captures_parses_and_stops_without_touching_gui(fake_sniffer, inte
     assert reassembler.expire_calls == [1234.5]
 
     session.stop()
-    assert worker.stop_calls == [True]
+    assert worker.stop_calls == [False]
     assert session.running is False
 
 
@@ -159,6 +159,7 @@ def test_raw_ipv6_packet_is_normalized_before_parsing(fake_sniffer, interface):
 
 def test_bounded_queue_drops_new_records_instead_of_blocking(fake_sniffer, interface):
     session = CaptureSession(queue_size=1, parser=FakeParser(), reassembler=FakeReassembler())
+    assert session.queue_capacity == 1
     session.start(interface)
     worker = fake_sniffer.instances[-1]
     worker.emit(Ether() / IP())
@@ -182,7 +183,8 @@ def test_parser_exception_becomes_visible_malformed_record(fake_sniffer, interfa
     assert "数据包解析失败" in record.info
     assert record.original_packet is packet
     assert session.stats.parse_errors == 1
-    assert "bad frame" in (session.last_error or "")
+    assert session.last_error is None
+    assert "bad frame" in (session.last_warning or "")
 
 
 def test_completed_fragment_emits_virtual_record_without_original_packet(
@@ -235,3 +237,36 @@ def test_invalid_arguments_and_double_start_are_friendly(fake_sniffer, interface
         session.start(interface)
     with pytest.raises(ValueError, match="正整数"):
         session.drain(0)
+
+
+def test_failed_stop_keeps_session_running_and_blocks_second_worker(
+    fake_sniffer, interface
+):
+    session = CaptureSession(parser=FakeParser(), reassembler=FakeReassembler())
+    session.start(interface)
+    worker = fake_sniffer.instances[-1]
+
+    def fail_stop(*, join=True):
+        raise OSError("socket close failed")
+
+    worker.stop = fail_stop
+    with pytest.raises(CaptureError, match="socket close failed"):
+        session.stop()
+
+    assert session.running is True
+    with pytest.raises(CaptureError, match="已在运行"):
+        session.start(interface)
+    assert len(fake_sniffer.instances) == 1
+
+
+def test_unexpected_worker_failure_becomes_fatal_session_error(
+    fake_sniffer, interface
+):
+    session = CaptureSession(parser=FakeParser(), reassembler=FakeReassembler())
+    session.start(interface)
+    worker = fake_sniffer.instances[-1]
+    worker.running = False
+    worker.exception = OSError("Npcap read failed")
+
+    assert session.running is False
+    assert "Npcap read failed" in (session.last_error or "")
