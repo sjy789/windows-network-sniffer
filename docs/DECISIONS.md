@@ -27,4 +27,18 @@
 - 每个捕获包都会触发过期分片清理，即使后续流量不再包含分片，也能落实
   30 秒超时策略。
 - 显式加载微软雅黑字体，避免部分 Qt/Windows 环境中文显示成方框。
-- 项目仍未增加 IPv6 深度解析、TCP 流重组或 TLS 解密，范围没有扩张。
+- 当时项目仍未增加 IPv6 深度解析、TCP 流重组或 TLS 解密。
+
+## 2026-07-15：IPv6 深度解析
+
+- Ethernet `0x86DD`、原始 IPv6 和常见 DLT_NULL IPv6 地址族统一进入手写解析器。
+- IPv6 固定首部完整展示 Version、Traffic Class、DSCP/ECN、Flow Label、
+  Payload Length、Next Header、Hop Limit 和源/目标地址。
+- 按 `Next Header` 遍历 Hop-by-Hop、Routing、Fragment、Destination Options、
+  AH 和 ESP；最多遍历 16 个扩展首部，并对截断、保留位和异常长度做防御性检查。
+- ICMPv6 深度解析覆盖 Echo、错误报文、邻居发现、路由器发现、Redirect、
+  MLD/MLDv2，以及常见 ND 选项。
+- IPv6 Fragment Header 只做字段解析和非首片保护，不接入现有 IPv4 重组缓存；
+  因此不会把非首片数据误判为 TCP/UDP 端口，也不会混用两套分片语义。
+- 显示过滤新增 `ipv6`/`ip6` 和 `icmpv6`/`icmp6`，IPv6 地址继续使用统一的
+  `ip:`、`src:`、`dst:` 语法。

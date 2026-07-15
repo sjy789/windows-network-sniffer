@@ -176,7 +176,7 @@ class MainWindow(QMainWindow):
         self.interface_combo.setMinimumWidth(480)
         self.refresh_button = QPushButton("刷新网卡")
         self.capture_filter_edit = QLineEdit()
-        self.capture_filter_edit.setPlaceholderText("可选 BPF 抓取过滤，例如 tcp or udp port 53")
+        self.capture_filter_edit.setPlaceholderText("可选 BPF 抓取过滤，例如 icmp6 or tcp or udp port 53")
         self.start_button = QPushButton("开始")
         self.stop_button = QPushButton("停止")
         self.clear_button = QPushButton("清空")
@@ -197,7 +197,9 @@ class MainWindow(QMainWindow):
         filter_row = QHBoxLayout()
         filter_row.addWidget(QLabel("显示过滤："))
         self.display_filter_edit = QLineEdit()
-        self.display_filter_edit.setPlaceholderText("例如：tcp ip:192.168.1.10 port:443（多个条件为 AND）")
+        self.display_filter_edit.setPlaceholderText(
+            "例如：ipv6 icmpv6，或 tcp ip:192.168.1.10 port:443（多个条件为 AND）"
+        )
         self.apply_filter_button = QPushButton("应用")
         self.clear_filter_button = QPushButton("清除过滤")
         self.filter_feedback = QLabel("")

@@ -47,6 +47,30 @@ def ipv4_packet(
     return fixed + options + payload
 
 
+def ipv6_packet(
+    payload: bytes,
+    *,
+    next_header: int,
+    source: str = "2001:db8::1",
+    destination: str = "2001:db8::2",
+    traffic_class: int = 0x2E,
+    flow_label: int = 0xABCDE,
+    hop_limit: int = 64,
+    payload_length: int | None = None,
+) -> bytes:
+    first_word = (6 << 28) | (traffic_class << 20) | flow_label
+    declared_length = len(payload) if payload_length is None else payload_length
+    return struct.pack(
+        "!IHBB16s16s",
+        first_word,
+        declared_length,
+        next_header,
+        hop_limit,
+        ipaddress.ip_address(source).packed,
+        ipaddress.ip_address(destination).packed,
+    ) + payload
+
+
 def tcp_segment(payload: bytes = b"", *, options: bytes = b"") -> bytes:
     assert len(options) % 4 == 0
     offset_words = (20 + len(options)) // 4
@@ -71,6 +95,10 @@ def udp_datagram(payload: bytes = b"", *, declared_length: int | None = None) ->
 
 def icmp_echo(payload: bytes = b"") -> bytes:
     return struct.pack("!BBHHH", 8, 0, 0x1234, 0x5678, 9) + payload
+
+
+def icmpv6_echo(payload: bytes = b"") -> bytes:
+    return struct.pack("!BBHHH", 128, 0, 0x1234, 0x5678, 9) + payload
 
 
 def fields_for(record, layer_name: str) -> dict[str, str]:
@@ -290,3 +318,233 @@ def test_truncated_fragment_is_not_offered_for_reassembly() -> None:
 
     assert record.fragment is None
     assert any("不会进入重组缓存" in error for error in record.errors)
+
+
+def test_ipv6_extension_chain_and_icmpv6_echo_are_decoded_from_bytes() -> None:
+    # Hop-by-Hop -> Routing Type 2 -> Destination Options -> AH -> ICMPv6.
+    hop_by_hop = bytes([43, 0, 5, 2, 0, 0, 0, 0])
+    routing = struct.pack("!BBBBI16s", 60, 2, 2, 1, 0, ipaddress.ip_address("2001:db8::99").packed)
+    destination_options = bytes([51, 0, 1, 4, 0, 0, 0, 0])
+    authentication = struct.pack("!BBHII", 58, 1, 0, 0x10203040, 7)
+    payload = hop_by_hop + routing + destination_options + authentication + icmpv6_echo(b"v6-ping")
+    poison = PoisonOriginalPacket()
+
+    record = PacketParser().parse(
+        ethernet_header(0x86DD) + ipv6_packet(payload, next_header=0),
+        original_packet=poison,
+    )
+
+    assert record.errors == []
+    assert record.original_packet is poison
+    assert record.protocol == "ICMPv6"
+    assert record.source == "2001:db8::1"
+    assert record.destination == "2001:db8::2"
+    assert [layer.name for layer in record.layers] == [
+        "Ethernet II",
+        "Internet Protocol Version 6",
+        "IPv6 Hop-by-Hop Options Header",
+        "IPv6 Routing Header",
+        "IPv6 Destination Options Header",
+        "IPv6 Authentication Header",
+        "Internet Control Message Protocol v6",
+        "Data",
+    ]
+    ipv6_fields = fields_for(record, "Internet Protocol Version 6")
+    assert ipv6_fields["Traffic Class"] == "0x2E"
+    assert ipv6_fields["Flow Label"].startswith("0xABCDE")
+    assert "Router Alert=0" in fields_for(record, "IPv6 Hop-by-Hop Options Header")["Options"]
+    assert fields_for(record, "IPv6 Routing Header")["Home Address"] == "2001:db8::99"
+    assert fields_for(record, "IPv6 Authentication Header")["Security Parameters Index"] == "0x10203040"
+    icmp_fields = fields_for(record, "Internet Control Message Protocol v6")
+    assert icmp_fields["Identifier"].endswith("(22136)")
+    assert icmp_fields["Sequence Number"] == "9"
+    assert fields_for(record, "Data")["Printable Preview"] == "v6-ping"
+
+
+def test_ipv6_fragment_header_does_not_treat_non_initial_payload_as_tcp() -> None:
+    fake_transport = struct.pack("!HH", 65000, 443) + b"fragment-data"
+    fragment_header = struct.pack("!BBHI", 6, 0, (3 << 3) | 1, 0x12345678)
+    frame = ethernet_header(0x86DD) + ipv6_packet(
+        fragment_header + fake_transport,
+        next_header=44,
+    )
+
+    record = PacketParser().parse(frame)
+
+    assert record.errors == []
+    assert record.protocol == "IPv6-FRAG"
+    assert record.source_port is None
+    assert record.destination_port is None
+    fragment_fields = fields_for(record, "IPv6 Fragment Header")
+    assert fragment_fields["Fragment Offset"] == "3 (24 bytes)"
+    assert fragment_fields["More Fragments"] == "1"
+    assert fragment_fields["Identification"].startswith("0x12345678")
+    assert not any(layer.name == "Transmission Control Protocol" for layer in record.layers)
+    assert fields_for(record, "Fragment Data")["Length"] == f"{len(fake_transport)} bytes"
+
+
+def test_ipv6_first_fragment_can_decode_udp_without_false_truncation() -> None:
+    udp_first_piece = udp_datagram(b"12345678", declared_length=40)
+    fragment_header = struct.pack("!BBHI", 17, 0, 1, 0x90ABCDEF)
+    frame = ethernet_header(0x86DD) + ipv6_packet(
+        fragment_header + udp_first_piece,
+        next_header=44,
+    )
+
+    record = PacketParser().parse(frame)
+
+    assert record.protocol == "UDP"
+    assert (record.source_port, record.destination_port) == (5353, 9999)
+    assert "first fragment id=0x90ABCDEF" in record.info
+    assert not any("UDP 数据报被截断" in error for error in record.errors)
+
+
+def test_icmpv6_neighbor_solicitation_and_link_layer_option_are_decoded() -> None:
+    target = ipaddress.ip_address("2001:db8::1234").packed
+    source_link_layer = struct.pack("!BB6s", 1, 1, SOURCE_MAC)
+    solicitation = struct.pack("!BBHI16s", 135, 0, 0xBEEF, 0, target) + source_link_layer
+
+    record = PacketParser().parse(
+        ethernet_header(0x86DD) + ipv6_packet(solicitation, next_header=58)
+    )
+
+    assert record.errors == []
+    assert record.protocol == "ICMPv6"
+    assert record.info == "Neighbor Solicitation for 2001:db8::1234"
+    assert fields_for(record, "Internet Control Message Protocol v6")["Target Address"] == "2001:db8::1234"
+    option_fields = fields_for(record, "ICMPv6 Option: Source Link-Layer Address")
+    assert option_fields["Link-Layer Address"] == "AA:BB:CC:DD:EE:FF"
+
+
+def test_icmpv6_router_advertisement_decodes_prefix_mtu_and_rdnss() -> None:
+    advertisement = struct.pack("!BBHBBHII", 134, 0, 0xCAFE, 64, 0xC8, 1800, 30000, 1000)
+    prefix = struct.pack(
+        "!BBBBIII16s",
+        3,
+        4,
+        64,
+        0xC0,
+        3600,
+        1800,
+        0,
+        ipaddress.ip_address("2001:db8:abcd::").packed,
+    )
+    mtu = struct.pack("!BBHI", 5, 1, 0, 1500)
+    rdnss = struct.pack(
+        "!BBHI16s",
+        25,
+        3,
+        0,
+        600,
+        ipaddress.ip_address("2001:4860:4860::8888").packed,
+    )
+
+    record = PacketParser().parse(
+        ethernet_header(0x86DD)
+        + ipv6_packet(advertisement + prefix + mtu + rdnss, next_header=58)
+    )
+
+    assert record.errors == []
+    ra_fields = fields_for(record, "Internet Control Message Protocol v6")
+    assert ra_fields["Current Hop Limit"] == "64"
+    assert "Prf=High" in ra_fields["Flags"]
+    prefix_fields = fields_for(record, "ICMPv6 Option: Prefix Information")
+    assert prefix_fields["Prefix"] == "2001:db8:abcd::/64"
+    assert prefix_fields["Flags"] == "L=1, A=1, R=0"
+    assert fields_for(record, "ICMPv6 Option: MTU")["MTU"] == "1500"
+    assert fields_for(record, "ICMPv6 Option: Recursive DNS Server")["DNS Servers"] == "2001:4860:4860::8888"
+
+
+def test_icmpv6_packet_too_big_decodes_mtu_and_invoking_packet() -> None:
+    message = struct.pack("!BBHI", 2, 0, 0x1111, 1280) + b"embedded-ipv6"
+
+    record = PacketParser().parse(
+        ethernet_header(0x86DD) + ipv6_packet(message, next_header=58)
+    )
+
+    assert record.errors == []
+    assert record.info == "Packet Too Big: code 0"
+    assert fields_for(record, "Internet Control Message Protocol v6")["MTU"] == "1280"
+    assert fields_for(record, "Invoking Packet")["Printable Preview"] == "embedded-ipv6"
+
+
+def test_ipv6_esp_is_terminal_and_exposes_spi_and_sequence() -> None:
+    esp = struct.pack("!II", 0xAABBCCDD, 42) + b"encrypted"
+
+    record = PacketParser().parse(
+        ethernet_header(0x86DD) + ipv6_packet(esp, next_header=50)
+    )
+
+    assert record.errors == []
+    assert record.protocol == "ESP"
+    esp_fields = fields_for(record, "Encapsulating Security Payload")
+    assert esp_fields["Security Parameters Index"] == "0xAABBCCDD"
+    assert esp_fields["Sequence Number"] == "42"
+    assert esp_fields["Encrypted Payload and Trailer"] == "9 bytes"
+
+
+def test_raw_and_loopback_ipv6_link_types_are_supported() -> None:
+    packet = ipv6_packet(icmpv6_echo(), next_header=58)
+    parser = PacketParser()
+
+    raw_record = parser.parse(packet, link_type="raw_ipv6")
+    windows_loopback = parser.parse(struct.pack("<I", 23) + packet, link_type="loopback")
+    macos_loopback = parser.parse(struct.pack(">I", 30) + packet, link_type="loopback")
+
+    assert raw_record.protocol == "ICMPv6"
+    assert windows_loopback.protocol == "ICMPv6"
+    assert macos_loopback.protocol == "ICMPv6"
+    assert windows_loopback.layers[0].name == "Loopback"
+
+
+def test_empty_ipv6_packet_ignores_ethernet_padding() -> None:
+    frame = ethernet_header(0x86DD) + ipv6_packet(
+        b"",
+        next_header=59,
+        payload_length=0,
+    ) + b"\x00" * 6
+
+    record = PacketParser().parse(frame)
+
+    assert record.errors == []
+    assert record.protocol == "IPv6"
+    assert "No Next Header" in record.info
+    assert not any(layer.name == "Data" for layer in record.layers)
+
+
+def test_ipv6_extension_header_count_is_bounded() -> None:
+    hop_by_hop = bytes([0, 0, 0, 0, 0, 0, 0, 0])
+    frame = ethernet_header(0x86DD) + ipv6_packet(
+        hop_by_hop * 17,
+        next_header=0,
+    )
+
+    record = PacketParser().parse(frame)
+
+    assert record.protocol == "Malformed IPv6"
+    assert any("扩展首部过多" in error for error in record.errors)
+    assert [layer.name for layer in record.layers].count("IPv6 Hop-by-Hop Options Header") == 16
+
+
+@pytest.mark.parametrize(
+    ("payload", "next_header", "expected_error"),
+    [
+        (bytes([58, 2, 0, 0]), 0, "IPv6 Hop-by-Hop Options Header被截断"),
+        (
+            struct.pack("!BBHI16s", 135, 0, 0, 0, ipaddress.ip_address("2001:db8::1").packed)
+            + bytes([1, 0, 0, 0, 0, 0, 0, 0]),
+            58,
+            "ICMPv6 邻居发现 Option 1 长度为 0",
+        ),
+    ],
+)
+def test_malformed_ipv6_extensions_and_nd_options_are_reported(
+    payload: bytes,
+    next_header: int,
+    expected_error: str,
+) -> None:
+    record = PacketParser().parse(
+        ethernet_header(0x86DD) + ipv6_packet(payload, next_header=next_header)
+    )
+
+    assert any(expected_error in error for error in record.errors)
