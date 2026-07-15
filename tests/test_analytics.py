@@ -5,7 +5,7 @@ import struct
 
 from scapy.all import Ether, IPv6, Raw, TCP
 
-from sniffer.analytics import FlowTracker, TrafficMeter
+from sniffer.analytics import Flow, FlowTracker, TrafficMeter
 from sniffer.models import IPv4Fragment
 from sniffer.parser import PacketParser
 
@@ -85,3 +85,25 @@ def test_synthetic_reassembly_does_not_inflate_traffic_and_fragments_do_not_dupl
     assert meter.total_bytes == first.length
     assert tracker.flows[0].packet_count == 1
     assert bytes(tracker.flows[0].stream_ab) == b"complete"
+
+
+def test_stream_view_uses_text_encoding_when_readable() -> None:
+    flow = Flow("TCP", ("a", 1), ("b", 2), 0, 0)
+    flow.stream_ab.extend("中文会话".encode("gb18030"))
+
+    rendered = flow.stream_text()
+
+    assert "文本 GB18030" in rendered
+    assert "中文会话" in rendered
+    assert "�" not in rendered
+
+
+def test_stream_view_falls_back_to_hex_for_encrypted_or_binary_payload() -> None:
+    flow = Flow("TCP", ("a", 1), ("b", 2), 0, 0)
+    flow.stream_ab.extend(b"\x16\x03\x03\x00\xff\x80\x00\x01")
+
+    rendered = flow.stream_text()
+
+    assert "二进制或加密载荷" in rendered
+    assert "16 03 03 00 FF 80 00 01" in rendered
+    assert "�" not in rendered

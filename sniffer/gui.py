@@ -204,6 +204,14 @@ class PacketTableModel(QAbstractTableModel):
             return self._records[self._visible[visible_row]]
         return None
 
+    def row_for_record(self, target: PacketRecord) -> int:
+        """Return the visible row for the same record object after a reset."""
+
+        for visible_row, record_index in enumerate(self._visible):
+            if self._records[record_index] is target:
+                return visible_row
+        return -1
+
     def add_records(self, records: list[PacketRecord]) -> None:
         if not records:
             return
@@ -1433,6 +1441,7 @@ class MainWindow(QMainWindow):
     def _ingest_records(self, records: list[PacketRecord]) -> None:
         if not records:
             return
+        selected_record = self.table_model.record_at(self.packet_table.currentIndex().row())
         selected_flow = self.flow_model.flow_at(self.flow_table.currentIndex().row())
         self.table_model.add_records(records)
         self.traffic_meter.add(records)
@@ -1445,6 +1454,10 @@ class MainWindow(QMainWindow):
             selected_row = self.flow_model.row_for_flow(selected_flow)
             if selected_row >= 0:
                 self.flow_table.selectRow(selected_row)
+        if selected_record is not None:
+            selected_row = self.table_model.row_for_record(selected_record)
+            if selected_row >= 0:
+                self.packet_table.selectRow(selected_row)
         if not self.packet_table.currentIndex().isValid() and self.table_model.rowCount() > 0:
             self.packet_table.selectRow(0)
 

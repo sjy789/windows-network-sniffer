@@ -80,6 +80,23 @@ def test_packet_detail_and_hex_view(monkeypatch) -> None:
     window.close()
 
 
+def test_live_batch_refresh_preserves_selected_packet(monkeypatch) -> None:
+    monkeypatch.setattr(gui_module, "list_capture_interfaces", lambda: [])
+    window = gui_module.MainWindow(capture_session=FakeCaptureSession())
+    initial = [sample_record(), sample_record(), sample_record()]
+    window._ingest_records(initial)
+    window.packet_table.selectRow(1)
+    APP.processEvents()
+
+    window._ingest_records([sample_record(), sample_record()])
+    APP.processEvents()
+
+    selected = window.table_model.record_at(window.packet_table.currentIndex().row())
+    assert selected is initial[1]
+    assert "hello" in window.raw_view.toPlainText()
+    window.close()
+
+
 def test_table_model_reports_records_evicted_by_rolling_limit() -> None:
     model = gui_module.PacketTableModel(max_records=2)
 

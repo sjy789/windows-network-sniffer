@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import struct
 from typing import Iterable
 
+from .formatting import format_hex_ascii
 from .models import PacketRecord
 
 
@@ -89,9 +90,14 @@ class Flow:
     def stream_text(self, limit: int = 256_000) -> str:
         def render(label: str, data: bytearray) -> str:
             clipped = bytes(data[:limit])
-            text = clipped.decode("utf-8", errors="replace")
             suffix = "\n… stream truncated …" if len(data) > limit else ""
-            return f"[{label} | {len(data)} bytes]\n{text}{suffix}"
+            decoded = _readable_text(clipped)
+            if decoded is not None:
+                encoding, text = decoded
+                return f"[{label} | {len(data)} bytes | 文本 {encoding}]\n{text}{suffix}"
+            dump = format_hex_ascii(clipped)
+            notice = "二进制或加密载荷，已自动切换为 Hex / ASCII"
+            return f"[{label} | {len(data)} bytes | {notice}]\n{dump}{suffix}"
         return render("A → B", self.stream_ab) + "\n\n" + render("B → A", self.stream_ba)
 
 
@@ -258,6 +264,22 @@ def _ipv6_tcp_bounds(raw: bytes, offset: int) -> tuple[int, int] | None:
             return None
         next_header = raw[cursor]
         cursor += header_length
+    return None
+
+
+def _readable_text(data: bytes) -> tuple[str, str] | None:
+    """Decode likely text without presenting encrypted bytes as mojibake."""
+
+    if not data:
+        return ("UTF-8", "")
+    for encoding, label in (("utf-8", "UTF-8"), ("gb18030", "GB18030")):
+        try:
+            text = data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+        readable = sum(character.isprintable() or character in "\r\n\t" for character in text)
+        if text and readable / len(text) >= 0.85:
+            return (label, text)
     return None
 
 
