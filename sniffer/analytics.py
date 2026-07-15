@@ -39,17 +39,60 @@ class TrafficMeter:
             self.protocols[record.protocol or "UNKNOWN"] += 1
         for second in sorted(buckets):
             packets, byte_count = buckets[second]
-            if self.points and int(self.points[-1].timestamp) == second:
+            point = next(
+                (candidate for candidate in reversed(self.points) if int(candidate.timestamp) == second),
+                None,
+            )
+            if point is not None:
+                point.packets += packets
+                point.bytes += byte_count
+                continue
+            if not self.points or second > int(self.points[-1].timestamp):
+                self.advance(float(second))
                 point = self.points[-1]
                 point.packets += packets
                 point.bytes += byte_count
-            else:
-                self.points.append(TrafficPoint(float(second), packets, byte_count))
+
+    def advance(self, timestamp: float) -> bool:
+        """Advance the one-second timeline, explicitly retaining idle zeros."""
+
+        second = int(timestamp)
+        if not self.points:
+            self.points.append(TrafficPoint(float(second), 0, 0))
+            return True
+        previous = int(self.points[-1].timestamp)
+        if second <= previous:
+            return False
+        # A sleeping UI may wake after a large gap.  Only construct buckets
+        # that can survive in the bounded deque.
+        first = max(previous + 1, second - self.window + 1)
+        for bucket in range(first, second + 1):
+            self.points.append(TrafficPoint(float(bucket), 0, 0))
+        return True
+
+    def mark_stopped(self, timestamp: float) -> bool:
+        """Append a zero point so cards and chart never retain a stale rate."""
+
+        second = int(timestamp)
+        if not self.points:
+            self.points.append(TrafficPoint(float(second), 0, 0))
+            return True
+        latest = self.points[-1]
+        if latest.packets == 0 and latest.bytes == 0:
+            return self.advance(float(second))
+        self.points.append(TrafficPoint(float(max(second, int(latest.timestamp) + 1)), 0, 0))
+        return True
 
     def clear(self) -> None:
         self.points.clear()
         self.protocols.clear()
         self.total_packets = self.total_bytes = 0
+
+    def set_window(self, window: int) -> None:
+        if window < 2:
+            raise ValueError("window must be at least 2")
+        self.window = int(window)
+        self.points = deque(self.points, maxlen=self.window)
 
 
 @dataclass(slots=True)

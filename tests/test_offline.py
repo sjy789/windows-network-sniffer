@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import pytest
-from scapy.all import Ether, IP, UDP
+from scapy.all import Ether, IP, IPv6, UDP
+from scapy.layers.l2 import Loopback
 from scapy.utils import PcapNgWriter, wrpcap
 
 import sniffer.offline as offline_module
@@ -71,6 +72,33 @@ def test_load_capture_file_parses_packets_with_normal_pipeline(monkeypatch, tmp_
     assert len(result.records) == 1
     assert result.records[0].original_packet is packet
     assert result.records[0].link_type == "ethernet"
+
+
+@pytest.mark.parametrize(
+    ("packet", "expected_link_type", "expected_protocol"),
+    [
+        (IPv6(src="2001:db8::1", dst="2001:db8::2") / UDP(sport=10, dport=20), "raw_ipv6", "UDP"),
+        (
+            Loopback(type=24)
+            / IPv6(src="2001:db8::1", dst="2001:db8::2")
+            / UDP(sport=10, dport=20),
+            "loopback",
+            "UDP",
+        ),
+    ],
+)
+def test_load_capture_recognizes_ipv6_link_layers(
+    monkeypatch, tmp_path, packet, expected_link_type, expected_protocol
+) -> None:
+    monkeypatch.setattr(offline_module, "PcapReader", lambda path: FakeReader(path, [packet]))
+    path = tmp_path / "ipv6.pcap"
+    path.write_bytes(b"placeholder")
+
+    result = load_capture_file(path)
+
+    assert result.records[0].link_type == expected_link_type
+    assert result.records[0].protocol == expected_protocol
+    assert result.records[0].source == "2001:db8::1"
 
 
 def test_load_capture_file_emits_reassembled_virtual_record(monkeypatch, tmp_path) -> None:

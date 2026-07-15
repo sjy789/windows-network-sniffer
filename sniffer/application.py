@@ -5,6 +5,7 @@ from __future__ import annotations
 import struct
 
 from .models import ProtocolLayer
+from .tls import parse_client_hello
 
 
 def decode_application(transport: str, source_port: int, destination_port: int, payload: bytes) -> ProtocolLayer | None:
@@ -111,11 +112,10 @@ def _tls(data: bytes) -> ProtocolLayer | None:
         handshake = data[5]
         layer.add("Handshake Type", {1: "Client Hello", 2: "Server Hello", 11: "Certificate"}.get(handshake, handshake))
         if handshake == 1:
-            sni, alpn = _client_hello_extensions(data[9 : 5 + length])
-            if sni:
-                layer.add("Server Name (SNI)", sni)
-            if alpn:
-                layer.add("ALPN", ", ".join(alpn))
+            parsed = parse_client_hello(data)
+            if parsed.status == "complete" and parsed.hello is not None:
+                layer.add("Server Name (SNI)", parsed.hello.server_name or "未提供")
+                layer.add("ALPN", ", ".join(parsed.hello.alpn_protocols) or "未提供")
     return layer
 
 
