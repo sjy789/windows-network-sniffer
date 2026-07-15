@@ -900,7 +900,7 @@ class MainWindow(QMainWindow):
 
         self.capture_filter_edit = QLineEdit()
         self.capture_filter_edit.setMinimumWidth(140)
-        self.capture_filter_edit.setPlaceholderText("ip and (tcp or udp)")
+        self.capture_filter_edit.setPlaceholderText("icmp6 or (ip6 and tcp)")
         filter_row = QHBoxLayout()
         filter_row.addWidget(self.capture_filter_edit)
         layout.addWidget(self._toolbar_section("BPF 抓取过滤", filter_row), 3)
@@ -1007,7 +1007,7 @@ class MainWindow(QMainWindow):
 
         self.display_filter_edit = QLineEdit()
         self.display_filter_edit.setObjectName("displayFilter")
-        self.display_filter_edit.setPlaceholderText("tcp   ip:192.168.1.105   port:443")
+        self.display_filter_edit.setPlaceholderText("ipv6   icmpv6   src:2001:db8::1")
         self.display_filter_edit.setMinimumWidth(270)
         self.display_filter_edit.setMaximumWidth(430)
         self.apply_filter_button = _configure_button(QPushButton("应用"), icon="filter", kind="primary", icon_size=15)

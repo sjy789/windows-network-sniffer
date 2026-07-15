@@ -7,7 +7,7 @@ from threading import Event, RLock
 from time import time
 from typing import TYPE_CHECKING, Any
 
-from scapy.all import AsyncSniffer, Ether, IP
+from scapy.all import AsyncSniffer, Ether, IP, IPv6
 
 from .models import CaptureStats, InterfaceInfo, PacketRecord, ReassemblyResult
 
@@ -242,6 +242,8 @@ class CaptureSession:
                 return bytes(packet[Ether]), "ethernet", None
             if callable(getattr(packet, "haslayer", None)) and packet.haslayer(IP):
                 return bytes(packet[IP]), "raw_ipv4", None
+            if callable(getattr(packet, "haslayer", None)) and packet.haslayer(IPv6):
+                return bytes(packet[IPv6]), "raw_ipv6", None
             raw = bytes(packet)
         except Exception as exc:
             raise ValueError(f"无法读取数据包原始字节：{exc}") from exc

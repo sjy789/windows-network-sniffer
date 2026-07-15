@@ -53,8 +53,22 @@ def test_ip_and_port_match_either_direction() -> None:
 
 
 def test_ipv6_addresses_are_normalized() -> None:
-    record = _record(source="2001:0db8:0:0::1", destination="2001:db8::2")
+    record = _record(
+        source="2001:0db8:0:0::1",
+        destination="2001:db8::2",
+        protocol="ICMPv6",
+        source_port=None,
+        destination_port=None,
+        layers=[
+            ProtocolLayer("Ethernet II"),
+            ProtocolLayer("Internet Protocol Version 6"),
+            ProtocolLayer("Internet Control Message Protocol v6"),
+        ],
+    )
     assert DisplayFilter.parse("src:2001:db8::1 dst:2001:0db8::2").matches(record)
+    assert DisplayFilter.parse("ipv6 icmpv6").matches(record)
+    assert DisplayFilter.parse("ip6 icmp6").matches(record)
+    assert not DisplayFilter.parse("ipv4").matches(record)
 
 
 def test_protocol_can_be_observed_in_layer_list() -> None:

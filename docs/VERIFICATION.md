@@ -1,21 +1,23 @@
 # 项目验证记录
 
-验证日期：2026-07-12
-平台：Windows 11 x64、Python 3.13.7、Npcap 1.88、Wireshark 4.6.7
+最新自动化验证：2026-07-15，macOS arm64、Python 3.12.13
+Windows 实机验证：2026-07-12，Windows 11 x64、Python 3.13.7、Npcap 1.88、Wireshark 4.6.7
 
 ## 自动化验证
 
 2026-07-13 补丁回归环境：Windows 11 x64、Python 3.11.9。
 
 ```text
-81 passed
+97 passed
 pip check: No broken requirements found.
 compileall: passed
 ```
 
 覆盖范围包括：
 
-- Ethernet、双 VLAN、ARP、IPv4、ICMP、TCP、UDP 字段解析。
+- Ethernet、双 VLAN、ARP、IPv4、IPv6、ICMP、ICMPv6、TCP、UDP 字段解析。
+- IPv6 Hop-by-Hop、Routing、Fragment、Destination Options、AH、ESP 扩展首部链。
+- ICMPv6 Echo、错误报文、邻居/路由器发现、ND 选项和 MLD/MLDv2 字段。
 - IPv4/TCP 可变头长和 options。
 - 截断、畸形及未知链路层的容错。
 - Hex/ASCII 与 payload 可打印摘要。
@@ -45,6 +47,6 @@ compileall: passed
 ## 验收说明
 
 - 当 VPN/代理隧道启用时，应选择实际承载流量的虚拟接口进行测试。
-- BPF `tcp port 443` 也可能捕获 IPv6 TCP；本项目对 IPv6 仅标识、不深度解析，
-  若只验收 IPv4，可使用 `ip and tcp port 443`。
+- BPF `tcp port 443` 可同时捕获 IPv4/IPv6 TCP；若只验收 IPv4，可使用
+  `ip and tcp port 443`，只验收 IPv6 可使用 `ip6 and tcp port 443`。
 - 重组后的虚拟包用于显示和字段检查，不会重复写入原始 PCAP。

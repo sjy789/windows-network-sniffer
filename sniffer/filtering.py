@@ -19,7 +19,11 @@ _PROTOCOL_ALIASES = {
     "arp": "arp",
     "ip": "ipv4",
     "ipv4": "ipv4",
+    "ip6": "ipv6",
+    "ipv6": "ipv6",
     "icmp": "icmp",
+    "icmp6": "icmpv6",
+    "icmpv6": "icmpv6",
     "tcp": "tcp",
     "udp": "udp",
     "dns": "dns",
@@ -33,7 +37,9 @@ _PROTOCOL_ALIASES = {
     "ethernet ii": "ethernet",
     "address resolution protocol": "arp",
     "internet protocol version 4": "ipv4",
+    "internet protocol version 6": "ipv6",
     "internet control message protocol": "icmp",
+    "internet control message protocol v6": "icmpv6",
     "transmission control protocol": "tcp",
     "user datagram protocol": "udp",
 }
@@ -141,6 +147,8 @@ def _matches_protocol(record: PacketRecord, wanted: str) -> bool:
         # Parser records always use IP-shaped endpoints for IPv4, even if the
         # most-specific display protocol is TCP/UDP/ICMP.
         return _is_ip_version(record.source, 4) or _is_ip_version(record.destination, 4)
+    if wanted == "ipv6":
+        return _is_ip_version(record.source, 6) or _is_ip_version(record.destination, 6)
     return False
 
 

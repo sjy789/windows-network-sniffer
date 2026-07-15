@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from scapy.all import Ether, IP, UDP
+from scapy.all import Ether, IP, IPv6, UDP
 
 import sniffer.capture as capture_module
 from sniffer.capture import CaptureError, CaptureSession
@@ -143,6 +143,18 @@ def test_raw_ipv4_packet_is_normalized_before_parsing(fake_sniffer, interface):
 
     assert parser.calls[0]["link_type"] == "raw_ipv4"
     assert parser.calls[0]["raw"] == bytes(packet[IP])
+
+
+def test_raw_ipv6_packet_is_normalized_before_parsing(fake_sniffer, interface):
+    parser = FakeParser()
+    session = CaptureSession(parser=parser, reassembler=FakeReassembler())
+    session.start(interface)
+    packet = IPv6(src="2001:db8::1", dst="2001:db8::2") / UDP(sport=1, dport=2)
+
+    fake_sniffer.instances[-1].emit(packet)
+
+    assert parser.calls[0]["link_type"] == "raw_ipv6"
+    assert parser.calls[0]["raw"] == bytes(packet[IPv6])
 
 
 def test_bounded_queue_drops_new_records_instead_of_blocking(fake_sniffer, interface):
