@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 from scapy.all import Ether, IP, IPv6
+from scapy.layers.l2 import Loopback
 try:
     from scapy.utils import PcapReader
 except ImportError:  # pragma: no cover - depends on Scapy build
@@ -20,6 +21,7 @@ except ImportError:  # pragma: no cover - depends on Scapy build
 from .models import CaptureStats, PacketRecord, ReassemblyResult
 from .parser import PacketParser
 from .reassembly import IPv4Reassembler
+from .tls import TLSStreamReassembler
 
 
 class OfflineCaptureError(RuntimeError):
@@ -41,6 +43,7 @@ def load_capture_file(
     *,
     parser: PacketParser | None = None,
     reassembler: IPv4Reassembler | None = None,
+    tls_reassembler: TLSStreamReassembler | None = None,
     max_packets: int | None = None,
     batch_callback: Callable[[list[PacketRecord]], None] | None = None,
     progress_callback: Callable[[int], None] | None = None,
@@ -66,6 +69,7 @@ def load_capture_file(
 
     parser = parser or PacketParser()
     reassembler = reassembler or IPv4Reassembler()
+    tls_reassembler = tls_reassembler or TLSStreamReassembler()
     result = OfflineLoadResult()
 
     try:
@@ -76,7 +80,7 @@ def load_capture_file(
                     break
                 if max_packets is not None and index > max_packets:
                     break
-                _handle_packet(packet, parser, reassembler, result)
+                _handle_packet(packet, parser, reassembler, tls_reassembler, result)
                 if progress_callback is not None and (
                     result.stats.captured == 1 or result.stats.captured % batch_size == 0
                 ):
@@ -129,6 +133,7 @@ def _handle_packet(
     packet: Any,
     parser: PacketParser,
     reassembler: IPv4Reassembler,
+    tls_reassembler: TLSStreamReassembler,
     result: OfflineLoadResult,
 ) -> None:
     result.stats.captured += 1
@@ -155,6 +160,7 @@ def _handle_packet(
             )
             record.original_packet = packet
             record.link_type = link_type
+        _analyze_tls(record, tls_reassembler)
     except Exception as exc:  # noqa: BLE001
         raw = _safe_bytes(packet)
         record = PacketRecord(
@@ -171,13 +177,14 @@ def _handle_packet(
     if record.errors:
         result.stats.parse_errors += 1
     result.records.append(record)
-    _handle_fragment(record, parser, reassembler, result)
+    _handle_fragment(record, parser, reassembler, tls_reassembler, result)
 
 
 def _handle_fragment(
     record: PacketRecord,
     parser: PacketParser,
     reassembler: IPv4Reassembler,
+    tls_reassembler: TLSStreamReassembler,
     result: OfflineLoadResult,
 ) -> None:
     fragment = record.fragment
@@ -216,6 +223,9 @@ def _handle_fragment(
         virtual.is_reassembled = True
         virtual.reassembly_note = note or f"由 {reassembly.fragment_count} 个 IPv4 分片重组"
         virtual.link_type = virtual_link_type
+        _analyze_tls(virtual, tls_reassembler)
+        if virtual.errors:
+            result.stats.parse_errors += 1
     except Exception as exc:  # noqa: BLE001
         error = f"重组数据包解析失败：{exc}"
         virtual = PacketRecord(
@@ -236,10 +246,26 @@ def _handle_fragment(
     result.records.append(virtual)
 
 
+def _analyze_tls(record: PacketRecord, reassembler: TLSStreamReassembler) -> None:
+    try:
+        parsed = reassembler.process(record)
+    except Exception as exc:  # noqa: BLE001 - one malformed flow must not abort file loading
+        error = f"TLS TCP 流重组失败：{exc}"
+        if error not in record.errors:
+            record.errors.append(error)
+        return
+    if parsed.status == "malformed" and parsed.error:
+        error = f"TLS ClientHello 解析失败：{parsed.error}"
+        if error not in record.errors:
+            record.errors.append(error)
+
+
 def _packet_data(packet: Any) -> tuple[bytes, str, str | None]:
     try:
         if callable(getattr(packet, "haslayer", None)) and packet.haslayer(Ether):
             return bytes(packet[Ether]), "ethernet", None
+        if callable(getattr(packet, "haslayer", None)) and packet.haslayer(Loopback):
+            return bytes(packet[Loopback]), "loopback", None
         if callable(getattr(packet, "haslayer", None)) and packet.haslayer(IP):
             return bytes(packet[IP]), "raw_ipv4", None
         if callable(getattr(packet, "haslayer", None)) and packet.haslayer(IPv6):

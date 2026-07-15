@@ -5,8 +5,8 @@ import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import QModelIndex
-from PyQt6.QtWidgets import QApplication, QFileDialog
+from PyQt6.QtCore import QModelIndex, QSettings
+from PyQt6.QtWidgets import QApplication, QDialog, QFileDialog
 
 import sniffer.gui as gui_module
 from sniffer.models import CaptureStats, InterfaceInfo, PacketRecord, ProtocolLayer
@@ -168,6 +168,55 @@ def test_sidebar_opens_every_analysis_workspace(monkeypatch) -> None:
         assert window.workspace_pages.currentIndex() == index
         assert button.property("active") is True
 
+    window.close()
+
+
+def test_title_bar_settings_and_help_open_real_dialogs(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(gui_module, "list_capture_interfaces", lambda: [])
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    window = gui_module.MainWindow(capture_session=FakeCaptureSession(), settings_store=settings)
+
+    def accept_settings(dialog):
+        dialog.max_records_spin.setValue(3_000)
+        dialog.refresh_interval_spin.setValue(250)
+        dialog.chart_window_spin.setValue(90)
+        return QDialog.DialogCode.Accepted
+
+    help_calls = []
+    monkeypatch.setattr(gui_module.SettingsDialog, "exec", accept_settings)
+    monkeypatch.setattr(
+        gui_module.HelpDialog,
+        "exec",
+        lambda dialog: help_calls.append(dialog.windowTitle()) or QDialog.DialogCode.Rejected,
+    )
+
+    window.title_bar.settings_button.click()
+    window.title_bar.help_button.click()
+
+    assert window.table_model.max_records == 3_000
+    assert window._drain_timer.interval() == 250
+    assert window.traffic_meter.window == 90
+    assert settings.value("ui/chart_window_seconds", type=int) == 90
+    assert help_calls == ["帮助 · NetScope"]
+    window.close()
+
+
+def test_idle_capture_advances_chart_to_zero(monkeypatch) -> None:
+    monkeypatch.setattr(gui_module, "list_capture_interfaces", lambda: [])
+    session = FakeCaptureSession()
+    window = gui_module.MainWindow(capture_session=session)
+    record = sample_record()
+    record.timestamp = 100.4
+    window.traffic_meter.clear()
+    window._ingest_records([record])
+    session.running = True
+    monkeypatch.setattr(gui_module, "time", lambda: 102.1)
+
+    window._drain_capture_queue()
+
+    assert [point.packets for point in window.traffic_meter.points] == [1, 0, 0]
+    assert window.packet_rate_card.value.text() == "0"
+    session.running = False
     window.close()
 
 

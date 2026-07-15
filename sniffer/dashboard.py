@@ -43,7 +43,7 @@ class TrafficChart(QWidget):
             painter.drawLine(int(bounds.left()), int(y), int(bounds.right()), int(y))
         painter.setFont(QFont("Segoe UI", 9))
         painter.setPen(QColor("#65788b"))
-        painter.drawText(24, 19, "LIVE TRAFFIC · 60 SECOND SIGNAL")
+        painter.drawText(24, 19, f"LIVE TRAFFIC · {self.meter.window} SECOND SIGNAL")
         points = list(self.meter.points)
         if not points:
             painter.setPen(QColor("#8b9cad"))

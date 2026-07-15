@@ -17,6 +17,7 @@ from typing import Any
 from .formatting import format_payload_summary
 from .application import decode_application
 from .models import IPv4Fragment, PacketRecord, ProtocolLayer
+from .tls import TLS_PORTS, apply_client_hello, parse_client_hello
 
 
 _VLAN_ETHERTYPES = {0x8100, 0x88A8, 0x9100}
@@ -1482,6 +1483,9 @@ class PacketParser:
             layer.add("Options", self._format_tcp_options(record, options))
 
         payload = data[offset + tcp_header_length : end]
+        record.transport_payload = payload
+        record.tcp_sequence = sequence
+        record.tcp_flags = flags_value
         record.info = (
             f"{source_port} → {destination_port} [{flag_text}] "
             f"Seq={sequence} Ack={acknowledgment} Len={len(payload)}"
@@ -1489,6 +1493,16 @@ class PacketParser:
         self._identify_application(record, "TCP", source_port, destination_port)
         if payload:
             self._decode_application_payload(record, "TCP", source_port, destination_port, payload)
+            if destination_port in TLS_PORTS:
+                tls_result = parse_client_hello(payload)
+                if tls_result.status == "complete":
+                    apply_client_hello(record, tls_result)
+                elif tls_result.status == "incomplete":
+                    tls_layer = next((item for item in record.layers if item.name == "TLS"), None)
+                    if tls_layer is not None:
+                        tls_layer.add("ClientHello Parsing", "等待后续 TCP 分段重组")
+                elif tls_result.status == "malformed" and tls_result.error:
+                    self._add_error(record, f"TLS ClientHello 解析失败：{tls_result.error}")
             self._add_payload_layer(record, payload)
 
     def _format_tcp_options(self, record: PacketRecord, options: bytes) -> str:
