@@ -58,6 +58,7 @@ from .filtering import DisplayFilter, FilterSyntaxError
 from .formatting import format_hex_ascii
 from .interfaces import list_capture_interfaces
 from .models import InterfaceInfo, PacketRecord
+from .offline import load_capture_file
 from .storage import export_csv, save_pcap
 from .theme import APP_STYLESHEET, COLORS, make_icon
 
@@ -575,6 +576,8 @@ class MainWindow(QMainWindow):
         self._last_rate_time = monotonic()
         self._last_rate_count = 0
         self._capture_rate = 0
+        self._offline_stats: CaptureStats | None = None
+        self._offline_source = ""
         self._footer_restore_text = ""
         self._footer_notice_generation = 0
 
@@ -908,12 +911,14 @@ class MainWindow(QMainWindow):
         self.start_button = _configure_button(QPushButton("开始"), icon="play", kind="primary")
         self.stop_button = _configure_button(QPushButton("停止"), icon="stop")
         self.clear_button = _configure_button(QPushButton("清空"), icon="trash")
+        self.open_pcap_button = _configure_button(QPushButton("打开 PCAP"), icon="document")
         self.save_pcap_button = _configure_button(QPushButton("保存 PCAP"), icon="save")
         self.export_csv_button = _configure_button(QPushButton("导出 CSV"), icon="csv")
         for button, width in (
             (self.start_button, 76),
             (self.stop_button, 70),
             (self.clear_button, 70),
+            (self.open_pcap_button, 103),
             (self.save_pcap_button, 103),
             (self.export_csv_button, 98),
         ):
@@ -926,6 +931,7 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.stop_button)
         button_row.addWidget(self.clear_button)
         button_row.addSpacing(5)
+        button_row.addWidget(self.open_pcap_button)
         button_row.addWidget(self.save_pcap_button)
         button_row.addWidget(self.export_csv_button)
         layout.addWidget(self._toolbar_section(" ", button_row), 0)
@@ -1096,6 +1102,7 @@ class MainWindow(QMainWindow):
         self.start_button.clicked.connect(self.start_capture)
         self.stop_button.clicked.connect(self.stop_capture)
         self.clear_button.clicked.connect(self.clear_packets)
+        self.open_pcap_button.clicked.connect(self.open_offline_capture)
         self.save_pcap_button.clicked.connect(self.save_capture)
         self.export_csv_button.clicked.connect(self.export_summary)
         self.apply_filter_button.clicked.connect(self.apply_display_filter)
@@ -1160,6 +1167,8 @@ class MainWindow(QMainWindow):
         if not isinstance(interface, InterfaceInfo):
             QMessageBox.warning(self, "无法开始", "请先选择可用网卡。")
             return
+        self._offline_stats = None
+        self._offline_source = ""
         try:
             self._session.start(interface, self.capture_filter_edit.text().strip())
         except Exception as exc:  # noqa: BLE001
@@ -1191,6 +1200,8 @@ class MainWindow(QMainWindow):
         self.traffic_meter.clear()
         self.flow_tracker.clear()
         self.anomaly_detector.clear()
+        self._offline_stats = None
+        self._offline_source = ""
         self.flow_model.refresh()
         self.alert_model.refresh()
         self.stream_view.clear()
@@ -1198,6 +1209,31 @@ class MainWindow(QMainWindow):
         self._capture_rate = 0
         self._last_rate_count = self._session.stats.captured
         self._last_rate_time = monotonic()
+        self._update_status_counts()
+
+    def open_offline_capture(self) -> None:
+        if self._session.running:
+            QMessageBox.warning(self, "打开 PCAP", "请先停止当前实时抓包。")
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "打开离线抓包",
+            "",
+            "Capture files (*.pcap *.pcapng);;PCAP (*.pcap);;PCAPNG (*.pcapng);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            loaded = load_capture_file(Path(path))
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "打开失败", str(exc))
+            return
+
+        self.clear_packets()
+        self._offline_stats = loaded.stats
+        self._offline_source = Path(path).name
+        self._ingest_records(loaded.records)
+        self._set_capture_status(f"已加载离线抓包：{self._offline_source}")
         self._update_status_counts()
 
     def _set_filter_feedback(self, text: str, status: str = "") -> None:
@@ -1275,20 +1311,7 @@ class MainWindow(QMainWindow):
     def _drain_capture_queue(self) -> None:
         records = self._session.drain(max_items=300)
         if records:
-            selected_flow = self.flow_model.flow_at(self.flow_table.currentIndex().row())
-            self.table_model.add_records(records)
-            self.traffic_meter.add(records)
-            self.flow_tracker.add(records)
-            self.anomaly_detector.add(records)
-            self.flow_model.refresh()
-            self.alert_model.refresh()
-            self._refresh_dashboard()
-            if selected_flow is not None:
-                selected_row = self.flow_model.row_for_flow(selected_flow)
-                if selected_row >= 0:
-                    self.flow_table.selectRow(selected_row)
-            if not self.packet_table.currentIndex().isValid() and self.table_model.rowCount() > 0:
-                self.packet_table.selectRow(0)
+            self._ingest_records(records)
         # Reading running synchronizes unexpected AsyncSniffer termination and
         # keeps the controls usable after a background worker failure.
         running = self._session.running
@@ -1300,6 +1323,24 @@ class MainWindow(QMainWindow):
             self._set_capture_status("抓包线程已停止")
         self._update_controls()
         self._update_status_counts()
+
+    def _ingest_records(self, records: list[PacketRecord]) -> None:
+        if not records:
+            return
+        selected_flow = self.flow_model.flow_at(self.flow_table.currentIndex().row())
+        self.table_model.add_records(records)
+        self.traffic_meter.add(records)
+        self.flow_tracker.add(records)
+        self.anomaly_detector.add(records)
+        self.flow_model.refresh()
+        self.alert_model.refresh()
+        self._refresh_dashboard()
+        if selected_flow is not None:
+            selected_row = self.flow_model.row_for_flow(selected_flow)
+            if selected_row >= 0:
+                self.flow_table.selectRow(selected_row)
+        if not self.packet_table.currentIndex().isValid() and self.table_model.rowCount() > 0:
+            self.packet_table.selectRow(0)
 
     def _show_selected_packet(self, current: QModelIndex, _previous: QModelIndex) -> None:
         record = self.table_model.record_at(current.row())
@@ -1365,6 +1406,7 @@ class MainWindow(QMainWindow):
         self.interface_combo.setEnabled(not running)
         self.refresh_button.setEnabled(not running)
         self.capture_filter_edit.setEnabled(not running)
+        self.open_pcap_button.setEnabled(not running)
         self.title_bar.set_capture_running(running)
 
     def _update_capture_rate(self, captured: int, running: bool) -> None:
@@ -1384,11 +1426,13 @@ class MainWindow(QMainWindow):
             self._capture_rate = 0
 
     def _update_status_counts(self) -> None:
-        stats = self._session.stats
+        stats = self._offline_stats or self._session.stats
         running = self._session.running
         self._update_capture_rate(stats.captured, running)
 
         rate_caption = f"+{self._capture_rate:,} / min" if running else "实时捕获速率"
+        if self._offline_stats is not None:
+            rate_caption = f"离线文件 {self._offline_source}"
         filter_text = self.display_filter_edit.text().strip()
         visible_caption = filter_text[:30] if filter_text else "全部数据包"
         self.captured_card.set_value(f"{stats.captured:,}", rate_caption)
