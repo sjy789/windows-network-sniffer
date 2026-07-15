@@ -7,9 +7,10 @@ queue.  This module deliberately keeps all visual work on Qt's main thread.
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event
 from time import monotonic
 
-from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QPoint, QPointF, QSize, Qt, QTimer
+from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QObject, QPoint, QPointF, QSize, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QCloseEvent,
@@ -37,6 +38,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
+    QProgressDialog,
     QPushButton,
     QSplitter,
     QStackedWidget,
@@ -57,8 +59,8 @@ from .dashboard import MetricCard, TrafficChart
 from .filtering import DisplayFilter, FilterSyntaxError
 from .formatting import format_hex_ascii
 from .interfaces import list_capture_interfaces
-from .models import InterfaceInfo, PacketRecord
-from .offline import load_capture_file
+from .models import CaptureStats, InterfaceInfo, PacketRecord
+from .offline import OfflineLoadResult, load_capture_file
 from .storage import export_csv, save_pcap
 from .theme import APP_STYLESHEET, COLORS, make_icon
 
@@ -86,6 +88,38 @@ def _configure_button(
     button.setIconSize(QSize(icon_size, icon_size))
     button.setCursor(Qt.CursorShape.PointingHandCursor)
     return button
+
+
+class OfflineLoadWorker(QObject):
+    """Read a capture file off the GUI thread and emit bounded batches."""
+
+    batch_ready = pyqtSignal(object)
+    progress = pyqtSignal(int)
+    completed = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, path: Path, *, batch_size: int = 250) -> None:
+        super().__init__()
+        self.path = path
+        self.batch_size = batch_size
+        self._cancelled = Event()
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+
+    def run(self) -> None:
+        try:
+            result = load_capture_file(
+                self.path,
+                batch_callback=self.batch_ready.emit,
+                progress_callback=self.progress.emit,
+                cancel_requested=self._cancelled.is_set,
+                batch_size=self.batch_size,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+            return
+        self.completed.emit(result)
 
 
 class PacketTableModel(QAbstractTableModel):
@@ -578,6 +612,10 @@ class MainWindow(QMainWindow):
         self._capture_rate = 0
         self._offline_stats: CaptureStats | None = None
         self._offline_source = ""
+        self._offline_loading = False
+        self._offline_thread: QThread | None = None
+        self._offline_worker: OfflineLoadWorker | None = None
+        self._offline_progress: QProgressDialog | None = None
         self._footer_restore_text = ""
         self._footer_notice_generation = 0
 
@@ -1212,7 +1250,7 @@ class MainWindow(QMainWindow):
         self._update_status_counts()
 
     def open_offline_capture(self) -> None:
-        if self._session.running:
+        if self._session.running or self._offline_loading:
             QMessageBox.warning(self, "打开 PCAP", "请先停止当前实时抓包。")
             return
         path, _ = QFileDialog.getOpenFileName(
@@ -1223,18 +1261,86 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
-        try:
-            loaded = load_capture_file(Path(path))
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "打开失败", str(exc))
-            return
-
         self.clear_packets()
-        self._offline_stats = loaded.stats
         self._offline_source = Path(path).name
-        self._ingest_records(loaded.records)
-        self._set_capture_status(f"已加载离线抓包：{self._offline_source}")
+        self._offline_stats = CaptureStats()
+        self._offline_loading = True
+        self._set_capture_status(f"正在加载离线抓包：{self._offline_source}")
+
+        progress = QProgressDialog("已解析 0 个数据包", "取消", 0, 0, self)
+        progress.setWindowTitle("加载离线抓包")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+
+        thread = QThread(self)
+        worker = OfflineLoadWorker(Path(path))
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.batch_ready.connect(self._on_offline_batch)
+        worker.progress.connect(self._on_offline_progress)
+        worker.completed.connect(self._on_offline_complete)
+        worker.failed.connect(self._on_offline_failed)
+        worker.completed.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.completed.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        progress.canceled.connect(worker.cancel)
+        thread.finished.connect(self._on_offline_thread_finished)
+
+        self._offline_thread = thread
+        self._offline_worker = worker
+        self._offline_progress = progress
+        self._update_controls()
         self._update_status_counts()
+        progress.show()
+        thread.start()
+
+    def _on_offline_batch(self, records: object) -> None:
+        batch = records if isinstance(records, list) else []
+        if not batch:
+            return
+        self._ingest_records(batch)
+        if self._offline_stats is not None:
+            self._offline_stats.queued += len(batch)
+        self._update_status_counts()
+
+    def _on_offline_progress(self, captured: int) -> None:
+        if self._offline_stats is not None:
+            self._offline_stats.captured = captured
+        if self._offline_progress is not None:
+            self._offline_progress.setLabelText(f"已解析 {captured:,} 个数据包")
+
+    def _on_offline_complete(self, result: object) -> None:
+        if not isinstance(result, OfflineLoadResult):
+            self._on_offline_failed("离线加载器返回了无效结果")
+            return
+        self._offline_stats = result.stats
+        self._offline_loading = False
+        if self._offline_progress is not None:
+            self._offline_progress.close()
+        if result.cancelled:
+            self._set_capture_status(
+                f"已取消加载：{self._offline_source}，保留 {result.stats.queued:,} 条记录"
+            )
+        else:
+            self._set_capture_status(f"已加载离线抓包：{self._offline_source}")
+        self._update_controls()
+        self._update_status_counts()
+
+    def _on_offline_failed(self, message: str) -> None:
+        self._offline_loading = False
+        if self._offline_progress is not None:
+            self._offline_progress.close()
+        self._set_capture_status(f"离线加载失败：{message}")
+        self._update_controls()
+        QMessageBox.critical(self, "打开失败", message)
+
+    def _on_offline_thread_finished(self) -> None:
+        self._offline_thread = None
+        self._offline_worker = None
+        self._offline_progress = None
 
     def _set_filter_feedback(self, text: str, status: str = "") -> None:
         self.filter_feedback.setText(text)
@@ -1401,12 +1507,16 @@ class MainWindow(QMainWindow):
 
     def _update_controls(self) -> None:
         running = self._session.running
-        self.start_button.setEnabled(not running and bool(self._interfaces))
+        loading = self._offline_loading
+        self.start_button.setEnabled(not running and not loading and bool(self._interfaces))
         self.stop_button.setEnabled(running)
-        self.interface_combo.setEnabled(not running)
-        self.refresh_button.setEnabled(not running)
-        self.capture_filter_edit.setEnabled(not running)
-        self.open_pcap_button.setEnabled(not running)
+        self.interface_combo.setEnabled(not running and not loading)
+        self.refresh_button.setEnabled(not running and not loading)
+        self.capture_filter_edit.setEnabled(not running and not loading)
+        self.open_pcap_button.setEnabled(not running and not loading)
+        self.clear_button.setEnabled(not loading)
+        self.save_pcap_button.setEnabled(not loading)
+        self.export_csv_button.setEnabled(not loading)
         self.title_bar.set_capture_running(running)
 
     def _update_capture_rate(self, captured: int, running: bool) -> None:
@@ -1452,6 +1562,11 @@ class MainWindow(QMainWindow):
         self.title_bar.set_capture_running(running)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        if self._offline_worker is not None:
+            self._offline_worker.cancel()
+        if self._offline_thread is not None and self._offline_thread.isRunning():
+            self._offline_thread.quit()
+            self._offline_thread.wait(2000)
         if self._session.running:
             try:
                 self._session.stop()

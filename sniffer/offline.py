@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 from scapy.all import Ether, IP
@@ -32,6 +33,7 @@ class OfflineLoadResult:
     records: list[PacketRecord] = field(default_factory=list)
     stats: CaptureStats = field(default_factory=CaptureStats)
     expired_fragments: int = 0
+    cancelled: bool = False
 
 
 def load_capture_file(
@@ -40,6 +42,10 @@ def load_capture_file(
     parser: PacketParser | None = None,
     reassembler: IPv4Reassembler | None = None,
     max_packets: int | None = None,
+    batch_callback: Callable[[list[PacketRecord]], None] | None = None,
+    progress_callback: Callable[[int], None] | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
+    batch_size: int = 250,
 ) -> OfflineLoadResult:
     """Read a PCAP/PCAPNG file and return parsed packet records.
 
@@ -55,6 +61,8 @@ def load_capture_file(
         raise OfflineCaptureError(f"路径是文件夹而不是抓包文件：{target}")
     if max_packets is not None and max_packets <= 0:
         raise ValueError("max_packets must be greater than zero")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be greater than zero")
 
     parser = parser or PacketParser()
     reassembler = reassembler or IPv4Reassembler()
@@ -63,9 +71,18 @@ def load_capture_file(
     try:
         with _open_reader(target) as reader:
             for index, packet in enumerate(reader, start=1):
+                if cancel_requested is not None and cancel_requested():
+                    result.cancelled = True
+                    break
                 if max_packets is not None and index > max_packets:
                     break
                 _handle_packet(packet, parser, reassembler, result)
+                if progress_callback is not None and (
+                    result.stats.captured == 1 or result.stats.captured % batch_size == 0
+                ):
+                    progress_callback(result.stats.captured)
+                if batch_callback is not None and len(result.records) >= batch_size:
+                    _emit_batch(result, batch_callback)
     except OfflineCaptureError:
         raise
     except Exception as exc:  # noqa: BLE001 - convert parser/reader failures for GUI
@@ -76,8 +93,22 @@ def load_capture_file(
     except Exception:
         expired = []
     result.expired_fragments += len(expired)
-    result.stats.queued = len(result.records)
+    if progress_callback is not None and result.stats.captured:
+        progress_callback(result.stats.captured)
+    if batch_callback is not None:
+        _emit_batch(result, batch_callback)
+    else:
+        result.stats.queued = len(result.records)
     return result
+
+
+def _emit_batch(result: OfflineLoadResult, callback: Callable[[list[PacketRecord]], None]) -> None:
+    if not result.records:
+        return
+    batch = result.records
+    result.records = []
+    result.stats.queued += len(batch)
+    callback(batch)
 
 
 def _open_reader(path: Path):  # noqa: ANN202 - Scapy reader types are version-specific

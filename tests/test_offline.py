@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import pytest
 from scapy.all import Ether, IP, UDP
+from scapy.utils import PcapNgWriter, wrpcap
 
 import sniffer.offline as offline_module
 from sniffer.models import IPv4Fragment, PacketRecord, ReassemblyResult
-from sniffer.offline import load_capture_file
+from sniffer.offline import OfflineCaptureError, load_capture_file
 
 
 class FakeReader:
@@ -103,3 +105,90 @@ def test_load_capture_file_emits_reassembled_virtual_record(monkeypatch, tmp_pat
     assert result.stats.reassembled == 1
     assert result.records[1].is_reassembled is True
     assert result.records[1].original_packet is None
+
+
+def test_load_capture_file_streams_bounded_batches(monkeypatch, tmp_path) -> None:
+    packets = [Ether() / IP() / UDP(sport=index, dport=53) for index in range(1, 6)]
+    monkeypatch.setattr(offline_module, "PcapReader", lambda path: FakeReader(path, packets))
+    path = tmp_path / "batch.pcap"
+    path.write_bytes(b"placeholder")
+    batches: list[list[PacketRecord]] = []
+    progress: list[int] = []
+
+    result = load_capture_file(
+        path,
+        batch_size=2,
+        batch_callback=batches.append,
+        progress_callback=progress.append,
+    )
+
+    assert [len(batch) for batch in batches] == [2, 2, 1]
+    assert result.records == []
+    assert result.stats.captured == 5
+    assert result.stats.queued == 5
+    assert progress[-1] == 5
+
+
+def test_load_capture_file_can_be_cancelled(monkeypatch, tmp_path) -> None:
+    packets = [Ether() / IP() / UDP() for _ in range(10)]
+    monkeypatch.setattr(offline_module, "PcapReader", lambda path: FakeReader(path, packets))
+    path = tmp_path / "cancel.pcap"
+    path.write_bytes(b"placeholder")
+    batches: list[list[PacketRecord]] = []
+
+    result = load_capture_file(
+        path,
+        batch_size=2,
+        batch_callback=batches.append,
+        cancel_requested=lambda: sum(map(len, batches)) >= 2,
+    )
+
+    assert result.cancelled is True
+    assert result.stats.captured == 2
+    assert result.stats.queued == 2
+
+
+@pytest.mark.parametrize("suffix", [".pcap", ".pcapng"])
+def test_loads_real_capture_files(suffix, tmp_path) -> None:
+    path = tmp_path / f"real{suffix}"
+    packet = Ether() / IP(src="192.0.2.10", dst="198.51.100.20") / UDP(sport=5353, dport=53)
+    packet.time = 123.5
+    if suffix == ".pcap":
+        wrpcap(str(path), [packet])
+    else:
+        writer = PcapNgWriter(str(path))
+        try:
+            writer.write(packet)
+        finally:
+            writer.close()
+
+    result = load_capture_file(path)
+
+    assert result.stats.captured == 1
+    assert result.records[0].source == "192.0.2.10"
+    assert result.records[0].destination_port == 53
+    assert result.records[0].timestamp == pytest.approx(123.5)
+
+
+def test_real_capture_respects_packet_limit(tmp_path) -> None:
+    path = tmp_path / "limited.pcap"
+    packets = [
+        Ether(src="02:00:00:00:00:01", dst="02:00:00:00:00:02")
+        / IP(src="192.0.2.1", dst="198.51.100.2")
+        / UDP(sport=index + 1, dport=53)
+        for index in range(5)
+    ]
+    wrpcap(str(path), packets)
+
+    result = load_capture_file(path, max_packets=2)
+
+    assert result.stats.captured == 2
+    assert len(result.records) == 2
+
+
+def test_corrupted_capture_has_user_facing_error(tmp_path) -> None:
+    path = tmp_path / "corrupted.pcapng"
+    path.write_bytes(b"not a capture file")
+
+    with pytest.raises(OfflineCaptureError, match="捕获文件|抓包文件"):
+        load_capture_file(path)
