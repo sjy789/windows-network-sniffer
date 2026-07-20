@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from threading import Event
-from time import monotonic
+from time import monotonic, time
 
-from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QObject, QPoint, QPointF, QSize, Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QObject, QPoint, QPointF, QSettings, QSize, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QCloseEvent,
@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -56,6 +57,7 @@ from .capture import CaptureSession
 from .analytics import Flow, FlowTracker, TrafficMeter
 from .anomaly import Alert, AnomalyDetector
 from .dashboard import MetricCard, TrafficChart
+from .dialogs import HelpDialog, SettingsDialog, load_preferences, save_preferences
 from .filtering import DisplayFilter, FilterSyntaxError
 from .formatting import format_hex_ascii
 from .interfaces import list_capture_interfaces
@@ -235,6 +237,18 @@ class PacketTableModel(QAbstractTableModel):
         self._next_sequence = 1
         self._evicted_count = 0
         self.endResetModel()
+
+    def set_max_records(self, max_records: int) -> None:
+        if max_records <= 0:
+            raise ValueError("max_records 必须是正整数")
+        self.max_records = int(max_records)
+        overflow = max(0, len(self._records) - self.max_records)
+        if overflow:
+            self.beginResetModel()
+            del self._records[:overflow]
+            self._evicted_count += overflow
+            self._rebuild_visible()
+            self.endResetModel()
 
     def set_filter(self, display_filter: DisplayFilter) -> None:
         self.beginResetModel()
@@ -493,8 +507,8 @@ class WindowTitleBar(QFrame):
         self.minimize_button.clicked.connect(window.showMinimized)
         self.maximize_button.clicked.connect(self.toggle_maximize)
         self.close_button.clicked.connect(window.close)
-        self.settings_button.clicked.connect(lambda: window.show_section_notice("设置中心"))
-        self.help_button.clicked.connect(lambda: window.show_section_notice("使用帮助"))
+        self.settings_button.clicked.connect(window.open_settings)
+        self.help_button.clicked.connect(window.open_help)
 
     def _window_button(self, icon: str, tooltip: str, *, close: bool = False) -> QPushButton:
         button = QPushButton()
@@ -599,7 +613,12 @@ class StatisticCard(QFrame):
 class MainWindow(QMainWindow):
     """Network sniffer main window."""
 
-    def __init__(self, *, capture_session: CaptureSession | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        capture_session: CaptureSession | None = None,
+        settings_store: QSettings | None = None,
+    ) -> None:
         super().__init__()
         self.setObjectName("mainWindow")
         self.setWindowTitle("NetScope · 网络嗅探器")
@@ -609,9 +628,16 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(APP_STYLESHEET)
 
         self._session = capture_session or CaptureSession(queue_size=5_000)
+        self._settings_store = settings_store or QSettings(
+            QSettings.Format.IniFormat,
+            QSettings.Scope.UserScope,
+            "NetScope",
+            "NetScope",
+        )
+        self._preferences = load_preferences(self._settings_store)
         self._queue_capacity = int(getattr(self._session, "queue_capacity", 5_000))
         self._interfaces: list[InterfaceInfo] = []
-        self.traffic_meter = TrafficMeter(window=60)
+        self.traffic_meter = TrafficMeter(window=self._preferences.chart_window_seconds)
         self.flow_tracker = FlowTracker()
         self.anomaly_detector = AnomalyDetector()
         self._active_interface_name = ""
@@ -631,7 +657,7 @@ class MainWindow(QMainWindow):
         self._connect_signals()
 
         self._drain_timer = QTimer(self)
-        self._drain_timer.setInterval(100)
+        self._drain_timer.setInterval(self._preferences.refresh_interval_ms)
         self._drain_timer.timeout.connect(self._drain_capture_queue)
         self._drain_timer.start()
         self.refresh_interfaces()
@@ -663,7 +689,7 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(self._build_capture_toolbar())
         content_layout.addLayout(self._build_statistics_row())
 
-        self.table_model = PacketTableModel(parent=self)
+        self.table_model = PacketTableModel(max_records=self._preferences.max_records, parent=self)
         self.packet_table = self._build_packet_table()
         packet_panel = self._build_packet_panel()
 
@@ -758,7 +784,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(cards)
 
         self.traffic_chart = TrafficChart(self.traffic_meter)
-        layout.addWidget(self._panel("60 秒实时流量波形", self.traffic_chart), 1)
+        layout.addWidget(self._panel("实时流量波形", self.traffic_chart), 1)
 
         protocol_panel = QFrame()
         protocol_panel.setObjectName("panel")
@@ -1176,6 +1202,22 @@ class MainWindow(QMainWindow):
     def show_section_notice(self, section: str) -> None:
         self._show_temporary_status(f"{section}将在后续版本开放；当前页面保留全部实时抓包功能。", 3_500)
 
+    def open_settings(self) -> None:
+        dialog = SettingsDialog(self._preferences, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._preferences = dialog.preferences()
+        save_preferences(self._settings_store, self._preferences)
+        self.table_model.set_max_records(self._preferences.max_records)
+        self._drain_timer.setInterval(self._preferences.refresh_interval_ms)
+        self.traffic_meter.set_window(self._preferences.chart_window_seconds)
+        self._refresh_dashboard()
+        self._update_status_counts()
+        self._show_temporary_status("设置已保存并应用", 3_000)
+
+    def open_help(self) -> None:
+        HelpDialog(self).exec()
+
     def refresh_interfaces(self) -> None:
         if self._session.running:
             return
@@ -1225,6 +1267,8 @@ class MainWindow(QMainWindow):
             self._last_rate_time = monotonic()
             self._last_rate_count = 0
             self._capture_rate = 0
+            self.traffic_meter.advance(time())
+            self._refresh_dashboard()
             self._set_capture_status(f"正在监听： {interface.name}")
         self._update_controls()
 
@@ -1236,6 +1280,8 @@ class MainWindow(QMainWindow):
             self._set_capture_status(f"停止失败：{exc}")
         else:
             self._set_capture_status("抓包已停止")
+            self.traffic_meter.mark_stopped(time())
+            self._refresh_dashboard()
         self._update_controls()
         self._drain_capture_queue()
 
@@ -1435,6 +1481,10 @@ class MainWindow(QMainWindow):
             self._set_capture_status(f"最近解析警告：{self._session.last_warning}")
         elif not running and self.stop_button.isEnabled():
             self._set_capture_status("抓包线程已停止")
+            self.traffic_meter.mark_stopped(time())
+            self._refresh_dashboard()
+        elif running and self.traffic_meter.advance(time()):
+            self._refresh_dashboard()
         self._update_controls()
         self._update_status_counts()
 
@@ -1545,7 +1595,7 @@ class MainWindow(QMainWindow):
             self._capture_rate = instant if self._capture_rate == 0 else int(self._capture_rate * 0.55 + instant * 0.45)
             self._last_rate_count = captured
             self._last_rate_time = now
-        if not running and captured == 0:
+        if not running:
             self._capture_rate = 0
 
     def _update_status_counts(self) -> None:

@@ -8,12 +8,14 @@ from time import time
 from typing import TYPE_CHECKING, Any
 
 from scapy.all import AsyncSniffer, Ether, IP, IPv6
+from scapy.layers.l2 import Loopback
 
 from .models import CaptureStats, InterfaceInfo, PacketRecord, ReassemblyResult
 
 if TYPE_CHECKING:
     from .parser import PacketParser
     from .reassembly import IPv4Reassembler
+    from .tls import TLSStreamReassembler
 
 
 class CaptureError(RuntimeError):
@@ -33,6 +35,7 @@ class CaptureSession:
         queue_size: int = 5000,
         parser: PacketParser | None = None,
         reassembler: IPv4Reassembler | None = None,
+        tls_reassembler: TLSStreamReassembler | None = None,
     ) -> None:
         if isinstance(queue_size, bool) or not isinstance(queue_size, int) or queue_size <= 0:
             raise ValueError("queue_size 必须是正整数")
@@ -45,9 +48,14 @@ class CaptureSession:
             from .reassembly import IPv4Reassembler
 
             reassembler = IPv4Reassembler()
+        if tls_reassembler is None:
+            from .tls import TLSStreamReassembler
+
+            tls_reassembler = TLSStreamReassembler()
 
         self._parser = parser
         self._reassembler = reassembler
+        self._tls_reassembler = tls_reassembler
         self._queue: Queue[PacketRecord] = Queue(maxsize=queue_size)
         self._lock = RLock()
         self._sniffer: AsyncSniffer | None = None
@@ -130,6 +138,9 @@ class CaptureSession:
             clear = getattr(self._reassembler, "clear", None)
             if callable(clear):
                 clear()
+            tls_clear = getattr(self._tls_reassembler, "clear", None)
+            if callable(tls_clear):
+                tls_clear()
 
             options: dict[str, Any] = {
                 "iface": interface.pcap_name,
@@ -240,6 +251,8 @@ class CaptureSession:
         try:
             if callable(getattr(packet, "haslayer", None)) and packet.haslayer(Ether):
                 return bytes(packet[Ether]), "ethernet", None
+            if callable(getattr(packet, "haslayer", None)) and packet.haslayer(Loopback):
+                return bytes(packet[Loopback]), "loopback", None
             if callable(getattr(packet, "haslayer", None)) and packet.haslayer(IP):
                 return bytes(packet[IP]), "raw_ipv4", None
             if callable(getattr(packet, "haslayer", None)) and packet.haslayer(IPv6):
@@ -290,6 +303,7 @@ class CaptureSession:
                 # real captures so storage can reproduce the exact frame.
                 record.original_packet = packet
                 record.link_type = link_type
+            self._analyze_tls(record)
             if record.errors:
                 with self._lock:
                     self._stats.parse_errors += 1
@@ -377,6 +391,11 @@ class CaptureSession:
             virtual.is_reassembled = True
             virtual.reassembly_note = note or f"由 {result.fragment_count} 个 IPv4 分片重组"
             virtual.link_type = virtual_link_type
+            self._analyze_tls(virtual)
+            if virtual.errors:
+                with self._lock:
+                    self._stats.parse_errors += 1
+                    self.last_warning = f"重组数据包解析警告：{virtual.errors[0]}"
         except Exception as exc:
             error = f"重组数据包解析失败：{exc}"
             virtual = PacketRecord(
@@ -398,6 +417,21 @@ class CaptureSession:
         with self._lock:
             self._stats.reassembled += 1
         self._enqueue(virtual)
+
+    def _analyze_tls(self, record: PacketRecord) -> None:
+        try:
+            result = self._tls_reassembler.process(record)
+        except Exception as exc:
+            error = f"TLS TCP 流重组失败：{exc}"
+            if error not in record.errors:
+                record.errors.append(error)
+            with self._lock:
+                self.last_warning = error
+            return
+        if result.status == "malformed" and result.error:
+            error = f"TLS ClientHello 解析失败：{result.error}"
+            if error not in record.errors:
+                record.errors.append(error)
 
     @staticmethod
     def _reassembly_note(result: ReassemblyResult) -> str:

@@ -61,6 +61,9 @@ class PacketRecord:
     link_type: str = "ethernet"
     original_packet: Any = field(default=None, repr=False, compare=False)
     sequence: int = 0
+    transport_payload: bytes = field(default=b"", repr=False, compare=False)
+    tcp_sequence: int | None = field(default=None, repr=False, compare=False)
+    tcp_flags: int = field(default=0, repr=False, compare=False)
 
     @property
     def timestamp_text(self) -> str:

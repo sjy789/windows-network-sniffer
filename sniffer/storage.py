@@ -5,10 +5,11 @@ from __future__ import annotations
 import csv
 from collections.abc import Iterable
 from datetime import datetime
+import math
 from pathlib import Path
-from typing import Any
 
-from scapy.all import wrpcap
+from scapy.data import DLT_EN10MB, DLT_NULL, DLT_RAW
+from scapy.utils import RawPcapWriter
 
 from .models import PacketRecord
 
@@ -58,21 +59,62 @@ def save_pcap(path: str | Path, records: Iterable[PacketRecord]) -> int:
         for record in records
         if not record.is_reassembled and record.original_packet is not None
     ]
-    link_types = {record.link_type for record in original_records}
+    link_types = {_pcap_linktype(record.link_type) for record in original_records}
     if len(link_types) > 1:
-        names = ", ".join(sorted(link_types))
+        names = ", ".join(sorted({record.link_type for record in original_records}))
         raise StorageError(
             f"不能把不同链路层类型写入同一个 PCAP：{names}；请分别保存每次网卡会话"
         )
-    packets: list[Any] = [record.original_packet for record in original_records]
-    if not packets:
+    if not original_records:
         raise StorageError("没有可保存到 PCAP 的原始数据包")
 
+    writer: RawPcapWriter | None = None
     try:
-        wrpcap(str(target), packets)
+        linktype = next(iter(link_types))
+        writer = RawPcapWriter(str(target), linktype=linktype, sync=True)
+        # Scapy 2.7.0 treats numeric link type 0 (DLT_NULL) as falsy in the
+        # constructor and otherwise falls back to Ethernet when the header is
+        # written without a sample packet.
+        writer.linktype = linktype
+        writer.write_header(None)
+        for record in original_records:
+            timestamp = float(record.timestamp)
+            seconds = math.floor(timestamp)
+            microseconds = round((timestamp - seconds) * 1_000_000)
+            if microseconds >= 1_000_000:
+                seconds += 1
+                microseconds -= 1_000_000
+            writer.write_packet(
+                bytes(record.raw),
+                sec=seconds,
+                usec=microseconds,
+                caplen=len(record.raw),
+                wirelen=record.length,
+            )
+        writer.close()
+        writer = None
     except Exception as exc:
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:
+                pass
         raise StorageError(f"保存 PCAP 文件失败：{exc}") from exc
-    return len(packets)
+    return len(original_records)
+
+
+def _pcap_linktype(link_type: str) -> int:
+    normalized = link_type.strip().casefold().replace("-", "_")
+    if normalized in {"ethernet", "ether", "en10mb"}:
+        return DLT_EN10MB
+    if normalized in {"loopback", "null", "dlt_null"}:
+        return DLT_NULL
+    if normalized in {"raw_ipv4", "raw_ipv6", "raw_ip", "raw"}:
+        # DLT_RAW explicitly carries either IP version.  Scapy's IP and IPv6
+        # classes otherwise select DLT_IPV4/DLT_IPV6, which cannot coexist in
+        # one classic PCAP even though the on-disk packet bytes are compatible.
+        return DLT_RAW
+    raise StorageError(f"暂不支持保存链路层类型：{link_type or 'unknown'}")
 
 
 def _timestamp_text(timestamp: float) -> str:

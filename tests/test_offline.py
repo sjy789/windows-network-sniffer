@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from scapy.all import Ether, IP, IPv6, UDP
+from scapy.layers.l2 import Loopback
 from scapy.utils import PcapNgWriter, wrpcap
 
 import sniffer.offline as offline_module
@@ -83,6 +84,20 @@ def test_load_capture_file_recognizes_raw_ipv6_packets(monkeypatch, tmp_path) ->
     result = load_capture_file(path)
 
     assert result.records[0].link_type == "raw_ipv6"
+    assert result.records[0].protocol == "UDP"
+    assert result.records[0].source == "2001:db8::1"
+
+
+def test_load_capture_file_recognizes_loopback_ipv6_packets(monkeypatch, tmp_path) -> None:
+    packet = Loopback(type=24) / IPv6(src="2001:db8::1", dst="2001:db8::2") / UDP(sport=10, dport=20)
+    packet.time = 43.0
+    monkeypatch.setattr(offline_module, "PcapReader", lambda path: FakeReader(path, [packet]))
+    path = tmp_path / "loopback-ipv6.pcap"
+    path.write_bytes(b"placeholder")
+
+    result = load_capture_file(path)
+
+    assert result.records[0].link_type == "loopback"
     assert result.records[0].protocol == "UDP"
     assert result.records[0].source == "2001:db8::1"
 

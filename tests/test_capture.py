@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 from scapy.all import Ether, IP, IPv6, UDP
+from scapy.layers.l2 import Loopback
 
 import sniffer.capture as capture_module
 from sniffer.capture import CaptureError, CaptureSession
@@ -155,6 +156,22 @@ def test_raw_ipv6_packet_is_normalized_before_parsing(fake_sniffer, interface):
 
     assert parser.calls[0]["link_type"] == "raw_ipv6"
     assert parser.calls[0]["raw"] == bytes(packet[IPv6])
+
+
+def test_loopback_keeps_shared_link_layer_for_ipv4_and_ipv6(fake_sniffer, interface):
+    parser = FakeParser()
+    session = CaptureSession(parser=parser, reassembler=FakeReassembler())
+    session.start(interface)
+    worker = fake_sniffer.instances[-1]
+    ipv4 = Loopback(type=2) / IP() / UDP()
+    ipv6 = Loopback(type=24) / IPv6() / UDP()
+
+    worker.emit(ipv4)
+    worker.emit(ipv6)
+
+    assert [call["link_type"] for call in parser.calls] == ["loopback", "loopback"]
+    assert parser.calls[0]["raw"] == bytes(ipv4)
+    assert parser.calls[1]["raw"] == bytes(ipv6)
 
 
 def test_bounded_queue_drops_new_records_instead_of_blocking(fake_sniffer, interface):
